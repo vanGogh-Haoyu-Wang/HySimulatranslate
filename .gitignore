@@ -1,0 +1,25 @@
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Build output
+dist/
+
+# Binary dependencies (users download separately)
+Libraries/sherpa-onnx/lib/
+
+# IDE
+.codex/
+.vscode/
+*.xcuserdata
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# Xcode
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
