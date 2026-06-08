@@ -3,7 +3,7 @@ import Security
 
 class KeychainManager {
     static let shared = KeychainManager()
-    private let service = "com.hytc.app"
+    private let service = "com.hysimulatranslate.app"
     private let legacyAccount = "groq_api_key"
 
     func save(key: String) -> Bool {

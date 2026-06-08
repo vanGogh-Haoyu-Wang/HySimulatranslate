@@ -1,4 +1,4 @@
-# HySimulatranslate (HYTC)
+# HySimulatranslate (HySimulatranslate)
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-macOS%2014.0%2B-blue" alt="platform">
@@ -109,7 +109,7 @@ bash script/build_and_run.sh
 
 脚本会：
 - 编译项目
-- 创建 `dist/HYTC.app` 应用程序包
+- 创建 `dist/HySimulatranslate.app` 应用程序包
 - 复制动态库到 `Frameworks/`
 - ad-hoc 签名
 - 启动应用
@@ -163,8 +163,8 @@ HySimulatranslate/
 │   ├── CSherpaOnnx/               # sherpa-onnx C 库模块映射
 │   │   ├── dummy.c
 │   │   └── module.modulemap
-│   └── HYTC/
-│       ├── HYTCApp.swift           # App 入口 + AppDelegate
+│   └── HySimulatranslate/
+│       ├── HySimulatranslateApp.swift           # App 入口 + AppDelegate
 │       ├── Views/
 │       │   ├── ContentView.swift   # 根视图（启动→同传切换）
 │       │   ├── StartupView.swift   # 启动配置弹窗
@@ -190,13 +190,13 @@ HySimulatranslate/
 │           ├── NvidiaSummaryService.swift  # NVIDIA 总结
 │           └── KeychainManager.swift    # API Key 钥匙串管理
 ├── Tests/
-│   └── HYTCTests/
-│       └── HYTCTests.swift
+│   └── HySimulatranslateTests/
+│       └── HySimulatranslateTests.swift
 ├── Libraries/
 │   └── sherpa-onnx/
 │       └── lib/                    # sherpa-onnx C 动态库（需自行下载）
 └── dist/
-    └── HYTC.app/                   # 构建产物（build_and_run.sh 生成）
+    └── HySimulatranslate.app/                   # 构建产物（build_and_run.sh 生成）
 ```
 
 ---

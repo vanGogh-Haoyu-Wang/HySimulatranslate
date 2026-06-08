@@ -215,7 +215,7 @@ final class TranscriptionViewModel: ObservableObject {
 
             guard await SpeechEngine.requestMicrophoneAccess() else {
                 await MainActor.run {
-                    self.handleStartFailure("麦克风权限未授权。请在系统设置中允许 HYTC 使用麦克风。")
+                    self.handleStartFailure("麦克风权限未授权。请在系统设置中允许 HySimulatranslate 使用麦克风。")
                 }
                 return
             }

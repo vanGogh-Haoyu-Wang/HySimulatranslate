@@ -1,7 +1,7 @@
 import XCTest
-@testable import HYTC
+@testable import HySimulatranslate
 
-final class HYTCTests: XCTestCase {
+final class HySimulatranslateTests: XCTestCase {
     private var temporaryDirectories: [URL] = []
 
     override func tearDownWithError() throws {
@@ -14,7 +14,7 @@ final class HYTCTests: XCTestCase {
 
     private func makeTemporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("HYTCTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("HySimulatranslateTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         temporaryDirectories.append(directory)
         return directory

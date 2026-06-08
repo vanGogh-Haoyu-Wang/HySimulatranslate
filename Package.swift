@@ -6,7 +6,7 @@ let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().pa
 let sherpaLibDir = "\(packageRoot)/Libraries/sherpa-onnx/lib"
 
 let package = Package(
-    name: "HYTC",
+    name: "HySimulatranslate",
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.10.0"),
@@ -17,12 +17,12 @@ let package = Package(
             path: "Sources/CSherpaOnnx"
         ),
         .executableTarget(
-            name: "HYTC",
+            name: "HySimulatranslate",
             dependencies: [
                 "CSherpaOnnx",
                 .product(name: "WhisperKit", package: "WhisperKit"),
             ],
-            path: "Sources/HYTC",
+            path: "Sources/HySimulatranslate",
             linkerSettings: [
                 .unsafeFlags(["-L", sherpaLibDir]),
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", sherpaLibDir]),
@@ -36,9 +36,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "HYTCTests",
-            dependencies: ["HYTC"],
-            path: "Tests/HYTCTests"
+            name: "HySimulatranslateTests",
+            dependencies: ["HySimulatranslate"],
+            path: "Tests/HySimulatranslateTests"
         ),
     ]
 )

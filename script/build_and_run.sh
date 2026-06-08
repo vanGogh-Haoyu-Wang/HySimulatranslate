@@ -2,8 +2,8 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="HYTC"
-BUNDLE_ID="com.hytc.app"
+APP_NAME="HySimulatranslate"
+BUNDLE_ID="com.hysimulatranslate.app"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,7 +55,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>HYTC needs microphone access to transcribe live audio.</string>
+  <string>HySimulatranslate needs microphone access to transcribe live audio.</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>
