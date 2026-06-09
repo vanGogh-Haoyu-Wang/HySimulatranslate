@@ -62,16 +62,22 @@ NVIDIA 实时总结 ──→ 中文摘要
 
 ## 依赖的模型
 
-应用运行时需要以下模型文件（自动检测，需预先放置）：
+源码运行时可以继续使用本机缓存；DMG 打包会把以下模型复制进 `.app`，首次启动再自动安装到：
+```
+~/Library/Application Support/HySimulatranslate/
+```
 
 ### sherpa-onnx 流式模型
-将 `sherpa-onnx-streaming-zipformer-en-2023-06-26` 解压到：
+默认打包源路径：
 ```
 ~/Library/Application Support/SherpaOnnxModel/sherpa-onnx-streaming-zipformer-en-2023-06-26/
 ```
 
 ### WhisperKit large-v3 模型
-首次运行 WhisperKit 会自动下载（需要网络），或可预先放置于 WhisperKit 缓存目录。
+默认打包源路径：
+```
+~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-large-v3/
+```
 
 ### sherpa-onnx C 库
 编译时需要 `Libraries/sherpa-onnx/lib/` 下的 `libsherpa-onnx-c-api.dylib` 和 `libonnxruntime.dylib`。
@@ -113,6 +119,26 @@ bash script/build_and_run.sh
 - 复制动态库到 `Frameworks/`
 - ad-hoc 签名
 - 启动应用
+
+### 5. 打包 DMG
+
+```bash
+bash script/package_dmg.sh --verify
+```
+
+脚本会生成：
+- `dist/HySimulatranslate.app`
+- `dist/HySimulatranslate.dmg`
+
+DMG 打开后，将 `HySimulatranslate.app` 拖到 `Applications`。这是第三方分发包，默认使用 ad-hoc 签名，不做 Apple notarization。
+
+可用环境变量覆盖模型源：
+
+```bash
+SHERPA_MODEL_SOURCE="/path/to/sherpa-model" \
+WHISPER_MODEL_SOURCE="/path/to/openai_whisper-large-v3" \
+bash script/package_dmg.sh --verify
+```
 
 ### 环境变量
 
@@ -158,7 +184,12 @@ HySimulatranslate/
 ├── Package.swift                  # Swift Package Manager 配置
 ├── Package.resolved               # 依赖版本锁定
 ├── script/
-│   └── build_and_run.sh           # 构建 .app 并启动
+│   ├── build_and_run.sh           # 构建 .app 并启动
+│   ├── package_dmg.sh             # 构建可拖拽安装的 DMG
+│   └── create_app_icon.swift      # 生成 macOS .icns 图标资源
+├── Resources/
+│   ├── AppIcon.png
+│   └── AppIcon.icns
 ├── Sources/
 │   ├── CSherpaOnnx/               # sherpa-onnx C 库模块映射
 │   │   ├── dummy.c
@@ -216,11 +247,9 @@ HySimulatranslate/
 
 ## 下载与安装
 
-> 🚧 **即将发布** — 目前尚未打包为 `.dmg` 安装包。后续版本将提供：
-> - 可直接拖拽安装的 `.dmg` 文件
-> - 自动处理动态库依赖与模型下载
+从 `dist/HySimulatranslate.dmg` 安装：打开 DMG，将 `HySimulatranslate.app` 拖到 `Applications`。首次启动引擎时，App 会把随附模型与脚本安装到用户 Library 支持目录。
 
-在此之前，请通过源码编译运行（见上方「编译与运行」）。
+如果 macOS 提示来源限制，请右键点击 App 后选择打开，或按你的系统安全策略允许第三方应用。
 
 ---
 

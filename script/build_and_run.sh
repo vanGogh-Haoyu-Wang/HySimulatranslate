@@ -12,9 +12,11 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 SHERPA_LIB_DIR="$ROOT_DIR/Libraries/sherpa-onnx/lib"
+ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -23,12 +25,15 @@ swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS" "$APP_FRAMEWORKS" "$APP_CONTENTS/Resources"
+mkdir -p "$APP_MACOS" "$APP_FRAMEWORKS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
 if [[ -d "$SHERPA_LIB_DIR" ]]; then
   cp "$SHERPA_LIB_DIR"/*.dylib "$APP_FRAMEWORKS/"
+fi
+if [[ -f "$ICON_FILE" ]]; then
+  cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
 fi
 
 cat >"$INFO_PLIST" <<PLIST
@@ -40,6 +45,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

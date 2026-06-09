@@ -20,6 +20,86 @@ final class HySimulatranslateTests: XCTestCase {
         return directory
     }
 
+    func testAppResourceInstallerCopiesBundledPayloadWithoutOverwritingUserFiles() throws {
+        let root = try makeTemporaryDirectory()
+        let payload = root
+            .appendingPathComponent("Bundle")
+            .appendingPathComponent(AppResourceLocator.payloadDirectoryName)
+        let support = root.appendingPathComponent("Support")
+        let sherpaRelativePath = AppResourceLocator.sherpaModelRelativePath
+        let bundledSherpaModel = payload.appendingPathComponent(sherpaRelativePath)
+        let installedSherpaModel = support.appendingPathComponent(sherpaRelativePath)
+        let bundledScripts = payload.appendingPathComponent("Scripts")
+
+        try FileManager.default.createDirectory(at: bundledSherpaModel, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: installedSherpaModel, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bundledScripts, withIntermediateDirectories: true)
+        try Data("bundled tokens".utf8).write(to: bundledSherpaModel.appendingPathComponent("tokens.txt"))
+        try Data("user tokens".utf8).write(to: installedSherpaModel.appendingPathComponent("tokens.txt"))
+        try Data("#!/usr/bin/env bash\n".utf8).write(to: bundledScripts.appendingPathComponent("package_dmg.sh"))
+
+        try AppResourceLocator.installBundledResourcesIfNeeded(
+            supportDirectory: support,
+            bundledPayloadDirectory: payload
+        )
+
+        let preservedTokens = try String(contentsOf: installedSherpaModel.appendingPathComponent("tokens.txt"))
+        XCTAssertEqual(preservedTokens, "user tokens")
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: support
+                    .appendingPathComponent("Scripts")
+                    .appendingPathComponent("package_dmg.sh")
+                    .path
+            )
+        )
+    }
+
+    func testAppResourceLocatorPrefersInstalledModelsThenBundledPayload() throws {
+        let root = try makeTemporaryDirectory()
+        let support = root.appendingPathComponent("Support")
+        let payload = root
+            .appendingPathComponent("Bundle")
+            .appendingPathComponent(AppResourceLocator.payloadDirectoryName)
+        let supportSherpa = support.appendingPathComponent(AppResourceLocator.sherpaModelRelativePath)
+        let payloadSherpa = payload.appendingPathComponent(AppResourceLocator.sherpaModelRelativePath)
+        let supportWhisper = support.appendingPathComponent(AppResourceLocator.whisperModelRelativePath)
+        let payloadWhisper = payload.appendingPathComponent(AppResourceLocator.whisperModelRelativePath)
+
+        try FileManager.default.createDirectory(at: supportSherpa, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: payloadSherpa, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: supportWhisper, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: payloadWhisper, withIntermediateDirectories: true)
+
+        XCTAssertEqual(
+            AppResourceLocator.sherpaModelDirectory(
+                supportDirectory: support,
+                bundledPayloadDirectory: payload
+            )?.standardizedFileURL.path,
+            supportSherpa.standardizedFileURL.path
+        )
+        XCTAssertEqual(
+            AppResourceLocator.whisperModelSearchRoots(
+                supportDirectory: support,
+                bundledPayloadDirectory: payload
+            ).prefix(2).map { $0.standardizedFileURL.path },
+            [
+                supportWhisper.standardizedFileURL.path,
+                payloadWhisper.standardizedFileURL.path
+            ]
+        )
+
+        try FileManager.default.removeItem(at: supportSherpa)
+
+        XCTAssertEqual(
+            AppResourceLocator.sherpaModelDirectory(
+                supportDirectory: support,
+                bundledPayloadDirectory: payload
+            )?.standardizedFileURL.path,
+            payloadSherpa.standardizedFileURL.path
+        )
+    }
+
     func testCourseSubjectCodableRoundTrips() throws {
         let subject = CourseSubject(
             name: "Advanced Thermodynamics",

@@ -113,49 +113,7 @@ actor WhisperKitService {
     }
 
     nonisolated private static func defaultCacheSearchRoots() -> [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        var roots: [URL] = []
-
-        if let explicitHubCache = ProcessInfo.processInfo.environment["HUGGINGFACE_HUB_CACHE"], !explicitHubCache.isEmpty {
-            roots.append(URL(fileURLWithPath: explicitHubCache))
-        }
-        if let hfHome = ProcessInfo.processInfo.environment["HF_HOME"], !hfHome.isEmpty {
-            roots.append(URL(fileURLWithPath: hfHome).appendingPathComponent("hub"))
-        }
-
-        roots.append(
-            home
-                .appendingPathComponent(".cache")
-                .appendingPathComponent("huggingface")
-                .appendingPathComponent("hub")
-                .appendingPathComponent("models--argmaxinc--whisperkit-coreml")
-        )
-        roots.append(
-            home
-                .appendingPathComponent("Library")
-                .appendingPathComponent("Caches")
-                .appendingPathComponent("huggingface")
-                .appendingPathComponent("hub")
-                .appendingPathComponent("models--argmaxinc--whisperkit-coreml")
-        )
-        roots.append(
-            home
-                .appendingPathComponent("Library")
-                .appendingPathComponent("Caches")
-                .appendingPathComponent("whisperkit")
-                .appendingPathComponent("argmaxinc")
-                .appendingPathComponent("whisperkit-coreml")
-        )
-        roots.append(
-            home
-                .appendingPathComponent("Documents")
-                .appendingPathComponent("huggingface")
-                .appendingPathComponent("models")
-                .appendingPathComponent("argmaxinc")
-                .appendingPathComponent("whisperkit-coreml")
-        )
-
-        return roots
+        AppResourceLocator.whisperModelSearchRoots()
     }
 
     nonisolated private static func findCachedModelFolder(under root: URL, model: String) -> URL? {

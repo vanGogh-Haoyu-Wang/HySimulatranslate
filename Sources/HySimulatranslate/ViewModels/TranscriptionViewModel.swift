@@ -112,21 +112,33 @@ final class TranscriptionViewModel: ObservableObject {
             guard let self else { return }
             defer { self.isChecking = false }
 
-            // 1️⃣ Sherpa-onnx 模型检查
-            print("[TranscriptionViewModel] Self-check started for \(course.name)")
-            setStatus(.checking("检查 Sherpa-onnx 模型..."))
-            let sherpaModelDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/SherpaOnnxModel")
-                .appendingPathComponent("sherpa-onnx-streaming-zipformer-en-2023-06-26")
-                .path
-
-            guard FileManager.default.fileExists(atPath: sherpaModelDir),
-                  await sherpaService.configure(modelDir: sherpaModelDir) else {
+            setStatus(.checking("准备随附模型资源..."))
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try AppResourceLocator.installBundledResourcesIfNeeded()
+                }.value
+            } catch {
                 sherpaReady = false
                 whisperReady = false
                 apiReady = false
                 publishSelfCheckSummary(sherpa: false, whisper: false, providerResults: providerCheckResults)
-                setStatus(.error("Sherpa 模型缺失：请确保 \(sherpaModelDir) 存在"))
+                setStatus(.error("随附资源安装失败：\(error.localizedDescription)"))
+                return
+            }
+
+            // 1️⃣ Sherpa-onnx 模型检查
+            print("[TranscriptionViewModel] Self-check started for \(course.name)")
+            setStatus(.checking("检查 Sherpa-onnx 模型..."))
+            let sherpaModelDir = AppResourceLocator.sherpaModelDirectory()
+
+            guard let sherpaModelDir,
+                  FileManager.default.fileExists(atPath: sherpaModelDir.path),
+                  await sherpaService.configure(modelDir: sherpaModelDir.path) else {
+                sherpaReady = false
+                whisperReady = false
+                apiReady = false
+                publishSelfCheckSummary(sherpa: false, whisper: false, providerResults: providerCheckResults)
+                setStatus(.error("Sherpa 模型缺失：请确保 \(AppResourceLocator.sherpaModelRelativePath) 已随 App 安装"))
                 return
             }
             sherpaReady = true
