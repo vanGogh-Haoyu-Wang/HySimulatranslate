@@ -75,19 +75,41 @@ enum LLMTaskType: String {
     case aggregate
 }
 
+enum WhisperRefinementMode: String, CaseIterable, Identifiable {
+    case localFirst
+    case cloudFirst
+    case localOnly
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .localFirst: return "本地优先"
+        case .cloudFirst: return "云端优先"
+        case .localOnly: return "仅本地"
+        }
+    }
+}
+
 struct LLMQueueItem {
     let priority: Int
     let timestamp: TimeInterval
     let taskType: LLMTaskType
     let uid: UUID
+    let sourceIDs: [UUID]
     let rawText: String
+    let whisperText: String
+    let sherpaText: String
 }
 
 // MARK: - Whisper Queue Item
 struct WhisperQueueItem {
     let uid: UUID
     var pcmData: Data
+    var denoisedPCMData: Data? = nil
     let sherpaTextBackup: String
+    var whisperText: String? = nil
+    var vadSpeechRatio: Double? = nil
 }
 
 // MARK: - 引擎状态

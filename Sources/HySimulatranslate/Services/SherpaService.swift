@@ -7,6 +7,8 @@ actor SherpaService {
     private var recognizer: OpaquePointer?
     private var stream: OpaquePointer?
     private var isConfigured = false
+    private let voiceActivityService = VoiceActivityService()
+    private var voiceActivityReady = false
 
     nonisolated let forbiddenEnds: Set<String> = [
         "of", "the", "and", "or", "a", "an", "is", "are", "in", "on", "at",
@@ -76,11 +78,23 @@ actor SherpaService {
         return true
     }
 
+    func configureVoiceActivity(modelURL: URL?) -> Bool {
+        guard let modelURL else {
+            voiceActivityReady = false
+            voiceActivityService.destroy()
+            return false
+        }
+        voiceActivityReady = voiceActivityService.configure(modelURL: modelURL)
+        return voiceActivityReady
+    }
+
     func destroy() {
         isRunning = false
         workerTask?.cancel()
         if let s = stream { SherpaOnnxDestroyOnlineStream(s); self.stream = nil }
         if let r = recognizer { SherpaOnnxDestroyOnlineRecognizer(r); self.recognizer = nil }
+        voiceActivityService.destroy()
+        voiceActivityReady = false
         isConfigured = false
         audioBuffer = Data()
     }
@@ -104,6 +118,7 @@ actor SherpaService {
         lastAcousticTime = Date()
         lastPartialText = ""
         sfsProducedTextInSegment = false
+        voiceActivityService.reset()
 
         if stream != nil { SherpaOnnxDestroyOnlineStream(stream!) }
         stream = SherpaOnnxCreateOnlineStream(recognizer!)
@@ -130,8 +145,12 @@ actor SherpaService {
     func acceptWaveform(samples: [Float], sampleRate: Int32) {
         guard isRunning, let s = stream, let _ = recognizer else { return }
 
+        let vadDetectedSpeech = voiceActivityReady
+            ? voiceActivityService.acceptWaveform(samples: samples, sampleRate: sampleRate)
+            : nil
         let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(max(1, samples.count)))
-        if rms > 0.01 {
+        let hasAcousticActivity = vadDetectedSpeech ?? (rms > 0.01)
+        if hasAcousticActivity {
             lastAcousticTime = Date()
         }
 
@@ -231,6 +250,7 @@ actor SherpaService {
         lastTextTime = Date()
         lastAcousticTime = Date()
         sfsProducedTextInSegment = false
+        voiceActivityService.reset()
 
         let uid = UUID()
         print("[SherpaService] segment: \"\(displayText.prefix(60))\" pcm=\(pcmCopy.count)B sil=\(String(format: "%.2f", sil))s textSil=\(String(format: "%.2f", textSil))s audio=\(String(format: "%.2f", audioSec))s")

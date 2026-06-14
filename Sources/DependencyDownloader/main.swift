@@ -4,6 +4,7 @@ import WhisperKit
 @main
 struct DependencyDownloader {
     static func main() async throws {
+        let whisperModel = "large-v3-v20240930_626MB"
         let arguments = CommandLine.arguments.dropFirst()
         guard arguments.count == 2, arguments.first == "--whisper" else {
             fputs("usage: DependencyDownloader --whisper /path/to/openai_whisper-large-v3\n", stderr)
@@ -13,10 +14,10 @@ struct DependencyDownloader {
         let destination = URL(fileURLWithPath: String(arguments.last!), isDirectory: true)
             .standardizedFileURL
         let downloaded = try await WhisperKit.download(
-            variant: "large-v3",
+            variant: whisperModel,
             progressCallback: { progress in
                 let percent = Int(progress.fractionCompleted * 100)
-                print("Downloading WhisperKit large-v3 \(percent)%")
+                print("Downloading WhisperKit \(whisperModel) \(percent)%")
             }
         )
 

@@ -3,13 +3,18 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHERPA_LIB_DIR="$ROOT_DIR/Libraries/sherpa-onnx/lib"
-SHERPA_MODEL_SOURCE="${SHERPA_MODEL_SOURCE:-$HOME/Library/Application Support/SherpaOnnxModel/sherpa-onnx-streaming-zipformer-en-2023-06-26}"
+APP_SUPPORT_MODEL_ROOT="$HOME/Library/Application Support/HySimulatranslate/Models"
+SHERPA_MODEL_SOURCE="${SHERPA_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/Sherpa/sherpa-onnx-streaming-zipformer-en-2023-06-26}"
 WHISPER_MODEL_SOURCE="${WHISPER_MODEL_SOURCE:-$HOME/Library/Application Support/HySimulatranslate/Models/WhisperKit/openai_whisper-large-v3}"
+VAD_MODEL_SOURCE="${VAD_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/VAD/silero_vad.onnx}"
+DENOISER_MODEL_SOURCE="${DENOISER_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/Denoise/gtcrn_simple.onnx}"
 
 SHERPA_NPM_VERSION="${SHERPA_NPM_VERSION:-1.13.2}"
 SHERPA_NPM_PACKAGE="${SHERPA_NPM_PACKAGE:-sherpa-onnx-darwin-arm64}"
 SHERPA_NPM_BASE_URL="${SHERPA_NPM_BASE_URL:-https://unpkg.com/$SHERPA_NPM_PACKAGE@$SHERPA_NPM_VERSION}"
 SHERPA_MODEL_URL="${SHERPA_MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2}"
+VAD_MODEL_URL="${VAD_MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
+DENOISER_MODEL_URL="${DENOISER_MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx}"
 
 MODE="${1:---runtime}"
 
@@ -86,6 +91,24 @@ ensure_whisper_model() {
   (cd "$ROOT_DIR" && swift run DependencyDownloader --whisper "$WHISPER_MODEL_SOURCE")
 }
 
+ensure_vad_model() {
+  if [[ -f "$VAD_MODEL_SOURCE" ]]; then
+    return
+  fi
+
+  echo "Downloading Silero VAD model..."
+  download_file "$VAD_MODEL_URL" "$VAD_MODEL_SOURCE"
+}
+
+ensure_denoiser_model() {
+  if [[ -f "$DENOISER_MODEL_SOURCE" ]]; then
+    return
+  fi
+
+  echo "Downloading speech denoiser model..."
+  download_file "$DENOISER_MODEL_URL" "$DENOISER_MODEL_SOURCE"
+}
+
 case "$MODE" in
   --runtime)
     ensure_sherpa_libraries
@@ -93,6 +116,8 @@ case "$MODE" in
   --all)
     ensure_sherpa_libraries
     ensure_sherpa_model
+    ensure_vad_model
+    ensure_denoiser_model
     ensure_whisper_model
     ;;
   *)

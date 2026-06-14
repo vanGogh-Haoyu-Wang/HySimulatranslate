@@ -4,11 +4,13 @@ import WhisperKit
 // MARK: - 🚀 WhisperKit 本地引擎 — 先下载后加载，全程可视化
 
 actor WhisperKitService {
+    nonisolated static let defaultModel = "large-v3-v20240930_626MB"
+
     private var whisperKit: WhisperKit?
     private var isConfigured = false
     private let model: String
 
-    init(model: String = "large-v3") {
+    init(model: String = WhisperKitService.defaultModel) {
         self.model = model
     }
 
@@ -36,7 +38,7 @@ actor WhisperKitService {
                     print("[WhisperKitService] No cached model for '\(model)'; skipping download during self-check")
                     return false
                 }
-                onProgress?(0.05, "正在下载模型 (~950MB，仅首次)...")
+                onProgress?(0.05, "正在下载模型 (~626MB，仅首次)...")
                 modelFolder = try await WhisperKit.download(
                     variant: model,
                     progressCallback: { progress in

@@ -6,8 +6,12 @@ enum AppResourceLocator {
     static let supportDirectoryEnvironmentKey = "HYSIMULATRANSLATE_SUPPORT_DIR"
     static let sherpaModelFolderName = "sherpa-onnx-streaming-zipformer-en-2023-06-26"
     static let whisperModelFolderName = "openai_whisper-large-v3"
+    static let vadModelFileName = "silero_vad.onnx"
+    static let speechDenoiserModelFileName = "gtcrn_simple.onnx"
     static let sherpaModelRelativePath = "Models/Sherpa/\(sherpaModelFolderName)"
     static let whisperModelRelativePath = "Models/WhisperKit/\(whisperModelFolderName)"
+    static let vadModelRelativePath = "Models/VAD/\(vadModelFileName)"
+    static let speechDenoiserModelRelativePath = "Models/Denoise/\(speechDenoiserModelFileName)"
 
     static func defaultSupportDirectory(
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -53,6 +57,39 @@ enum AppResourceLocator {
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    static func vadModelFile(
+        supportDirectory: URL = defaultSupportDirectory(),
+        bundledPayloadDirectory: URL? = bundledPayloadDirectory()
+    ) -> URL? {
+        modelFile(
+            relativePath: vadModelRelativePath,
+            supportDirectory: supportDirectory,
+            bundledPayloadDirectory: bundledPayloadDirectory
+        )
+    }
+
+    static func speechDenoiserModelFile(
+        supportDirectory: URL = defaultSupportDirectory(),
+        bundledPayloadDirectory: URL? = bundledPayloadDirectory()
+    ) -> URL? {
+        modelFile(
+            relativePath: speechDenoiserModelRelativePath,
+            supportDirectory: supportDirectory,
+            bundledPayloadDirectory: bundledPayloadDirectory
+        )
+    }
+
+    static func isUsableSherpaModelDirectory(_ directory: URL) -> Bool {
+        let requiredGlobs = ["encoder*.onnx", "decoder*.onnx", "joiner*.onnx"]
+        let hasModelFiles = requiredGlobs.allSatisfy { pattern in
+            findFile(in: directory, matching: pattern) != nil
+        }
+        let hasTokens = FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("tokens.txt").path
+        )
+        return hasModelFiles && hasTokens
+    }
+
     static func whisperModelSearchRoots(
         supportDirectory: URL = defaultSupportDirectory(),
         bundledPayloadDirectory: URL? = bundledPayloadDirectory(),
@@ -74,6 +111,39 @@ enum AppResourceLocator {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/SherpaOnnxModel", isDirectory: true)
             .appendingPathComponent(sherpaModelFolderName, isDirectory: true)
+    }
+
+    private static func modelFile(
+        relativePath: String,
+        supportDirectory: URL,
+        bundledPayloadDirectory: URL?
+    ) -> URL? {
+        let candidates = [
+            supportDirectory.appendingRelativePath(relativePath),
+            bundledPayloadDirectory?.appendingRelativePath(relativePath)
+        ].compactMap { $0 }
+
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private static func findFile(in directory: URL, matching pattern: String) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        let parts = pattern.split(separator: "*", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2 else {
+            return files.first { $0.lastPathComponent == pattern }
+        }
+        let prefix = parts[0]
+        let suffix = parts[1]
+        return files.first {
+            $0.lastPathComponent.hasPrefix(prefix) && $0.lastPathComponent.hasSuffix(suffix)
+        }
     }
 
     private static func legacyWhisperCacheSearchRoots(environment: [String: String]) -> [URL] {
@@ -110,15 +180,6 @@ enum AppResourceLocator {
                 .appendingPathComponent("argmaxinc", isDirectory: true)
                 .appendingPathComponent("whisperkit-coreml", isDirectory: true)
         )
-        roots.append(
-            home
-                .appendingPathComponent("Documents", isDirectory: true)
-                .appendingPathComponent("huggingface", isDirectory: true)
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent("argmaxinc", isDirectory: true)
-                .appendingPathComponent("whisperkit-coreml", isDirectory: true)
-        )
-
         return roots
     }
 

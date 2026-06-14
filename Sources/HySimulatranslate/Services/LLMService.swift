@@ -33,6 +33,8 @@ actor LLMService {
         if item.taskType == .format {
             formatted = await formatWithGroq(
                 rawText: item.rawText,
+                whisperText: item.whisperText,
+                sherpaText: item.sherpaText,
                 mode: .format,
                 credential: groqCredential,
                 course: course,
@@ -41,6 +43,8 @@ actor LLMService {
         } else {
             formatted = await formatWithGroq(
                 rawText: item.rawText,
+                whisperText: item.whisperText,
+                sherpaText: item.sherpaText,
                 mode: .aggregate,
                 credential: groqCredential,
                 course: course,
@@ -118,6 +122,8 @@ actor LLMService {
 
     private func formatWithGroq(
         rawText: String,
+        whisperText: String = "",
+        sherpaText: String = "",
         mode: LLMTaskType,
         credential: LLMProviderCredential?,
         course: CourseSubject,
@@ -145,6 +151,8 @@ actor LLMService {
             """
         }
 
+        let sourceText = Self.sourceTextForPrompt(rawText: rawText, whisperText: whisperText, sherpaText: sherpaText)
+
         // 构建 prompt
         let prompt: String
         if mode == .format {
@@ -159,10 +167,11 @@ actor LLMService {
                 5. STRICT FORMATTING: Output EACH complete sentence on a NEW LINE. Do NOT combine multiple sentences into a paragraph.
                 6. Do NOT answer, advise, summarize, or add conversational filler.
                 7. DELETE repetitive hallucinations and meaningless duplicated segments.
+                8. Use the WhisperKit transcript as primary. Use the Sherpa draft only to recover obvious omissions, hallucinations, or technical term errors. Do NOT invent content.
                 Output ONLY the corrected meeting transcript.
 
                 Context: \(stableContext)
-                Raw ASR: \(rawText)
+                \(sourceText)
                 """
             } else {
                 prompt = """
@@ -173,10 +182,11 @@ actor LLMService {
                 3. Do NOT answer or add conversational filler.
                 4. DELETE REPETITIVE HALLUCINATIONS: Delete meaningless duplicated segments!
                 5. IMPORTANT: Do NOT change words or rephrase. Only fix punctuation and obvious phonetic errors.
+                6. Use the WhisperKit transcript as primary. Use the Sherpa draft only to recover obvious omissions, hallucinations, or technical term errors. Do NOT invent content.
                 Output ONLY the perfectly formatted text.
 
                 Context: \(stableContext)
-                Raw ASR: \(rawText)
+                \(sourceText)
                 """
             }
         } else {
@@ -232,6 +242,25 @@ actor LLMService {
         return fallbackText(for: rawText, mode: mode)
     }
 
+    nonisolated static func sourceTextForPrompt(
+        rawText: String,
+        whisperText: String,
+        sherpaText: String
+    ) -> String {
+        let whisper = whisperText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sherpa = sherpaText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sherpa.isEmpty, sherpa != whisper else {
+            return "Raw ASR: \(rawText)"
+        }
+        return """
+        WhisperKit primary transcript:
+        \(whisper.isEmpty ? rawText : whisper)
+
+        Sherpa draft reference:
+        \(sherpa)
+        """
+    }
+
     private enum ChatCompletionResult {
         case success(String)
         case failure(String)
@@ -245,6 +274,7 @@ actor LLMService {
         maxTokens: Int,
         timeout: TimeInterval
     ) async -> ChatCompletionResult {
+        await ChatRateLimiter.shared.waitTurn(for: credential)
         var request = URLRequest(url: credential.provider.chatCompletionsURL)
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
@@ -268,6 +298,7 @@ actor LLMService {
             guard let httpResp = response as? HTTPURLResponse else {
                 return .failure("无 HTTP 响应")
             }
+            await ChatRateLimiter.shared.noteHTTPStatus(httpResp.statusCode, for: credential)
             guard httpResp.statusCode == 200 else {
                 return .failure("HTTP \(httpResp.statusCode)")
             }

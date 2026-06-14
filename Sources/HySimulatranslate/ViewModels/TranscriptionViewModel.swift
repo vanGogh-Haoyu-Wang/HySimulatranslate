@@ -30,11 +30,23 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var liveSummaryReady = false
     @Published var isLiveSummaryUpdating = false
     @Published var isFinalizingSession = false
+    @AppStorage("whisperRefinementMode") var whisperRefinementModeRaw = WhisperRefinementMode.localFirst.rawValue
+    @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
 
     var providerAPIKeys: [LLMProviderID: String] = [:]
     var currentCourse: CourseSubject?
     var pauseVal: Double = 0.6
     var hardCutVal: Double = 20.0
+    var whisperRefinementMode: WhisperRefinementMode {
+        get { WhisperRefinementMode(rawValue: whisperRefinementModeRaw) ?? .localFirst }
+        set { whisperRefinementModeRaw = newValue.rawValue }
+    }
+    var defaultNoteDirectoryPath: String {
+        Self.defaultNoteDirectory().path
+    }
+    var effectiveNoteDirectoryPath: String {
+        Self.noteDirectory(from: noteDirectoryPath).path
+    }
 
     var canStartTranscription: Bool {
         guard !isFinalizingSession else { return false }
@@ -50,6 +62,7 @@ final class TranscriptionViewModel: ObservableObject {
     private let speechEngine = SpeechEngine()
     private let sherpaService = SherpaService()
     private let whisperKitService = WhisperKitService()
+    private let speechDenoiserService = SpeechDenoiserService()
     private let llmService = LLMService()
     private let translationService = TranslationService()
     private let nvidiaSummaryService = NvidiaSummaryService()
@@ -57,6 +70,8 @@ final class TranscriptionViewModel: ObservableObject {
     // 队列
     private var whisperQueue: [WhisperQueueItem] = []
     private var llmFormatQueue: [LLMQueueItem] = []
+    private var pendingLLMFormatBatch: [LLMQueueItem] = []
+    private var sourceIDsByLLMPrimaryID: [UUID: [UUID]] = [:]
     private var organizerQueue: [OrganizerQueueItem] = []
     private var transQueue: [(UUID, String)] = []
 
@@ -126,13 +141,28 @@ final class TranscriptionViewModel: ObservableObject {
                 return
             }
 
-            // 1️⃣ Sherpa-onnx 模型检查
+            // 1️⃣ Sherpa-onnx 模型检查 / 下载
             print("[TranscriptionViewModel] Self-check started for \(course.name)")
             setStatus(.checking("检查 Sherpa-onnx 模型..."))
-            let sherpaModelDir = AppResourceLocator.sherpaModelDirectory()
+            let sherpaModelDir: URL
+            do {
+                sherpaModelDir = try await ResourceDownloadService.ensureSherpaModel(onProgress: { [weak self] fraction, status in
+                    Task { @MainActor [weak self] in
+                        self?.downloadProgress = fraction
+                        self?.downloadStatus = status
+                        self?.setStatus(.checking(status))
+                    }
+                })
+            } catch {
+                sherpaReady = false
+                whisperReady = false
+                apiReady = false
+                publishSelfCheckSummary(sherpa: false, whisper: false, providerResults: providerCheckResults)
+                setStatus(.error("Sherpa 模型下载失败：\(error.localizedDescription)"))
+                return
+            }
 
-            guard let sherpaModelDir,
-                  FileManager.default.fileExists(atPath: sherpaModelDir.path),
+            guard FileManager.default.fileExists(atPath: sherpaModelDir.path),
                   await sherpaService.configure(modelDir: sherpaModelDir.path) else {
                 sherpaReady = false
                 whisperReady = false
@@ -143,21 +173,46 @@ final class TranscriptionViewModel: ObservableObject {
             }
             sherpaReady = true
 
-            // 2️⃣ WhisperKit 模型加载
-            setStatus(.checking("加载 WhisperKit 本地引擎..."))
-            whisperReady = await whisperKitService.configure(allowDownload: false, onProgress: { [weak self] fraction, status in
+            // 2️⃣ VAD / 降噪软依赖：失败时回退旧切段和原始 PCM
+            setStatus(.checking("检查 VAD 与降噪模型..."))
+            let vadURL = try? await ResourceDownloadService.ensureVADModel(onProgress: { [weak self] fraction, status in
                 Task { @MainActor [weak self] in
                     self?.downloadProgress = fraction
                     self?.downloadStatus = status
                 }
             })
+            let vadReady = await sherpaService.configureVoiceActivity(modelURL: vadURL)
+            if !vadReady {
+                print("[TranscriptionViewModel] VAD unavailable; using RMS/Sherpa boundary fallback")
+            }
+
+            let denoiserURL = try? await ResourceDownloadService.ensureSpeechDenoiserModel(onProgress: { [weak self] fraction, status in
+                Task { @MainActor [weak self] in
+                    self?.downloadProgress = fraction
+                    self?.downloadStatus = status
+                }
+            })
+            let denoiserReady = await speechDenoiserService.configure(modelURL: denoiserURL)
+            if !denoiserReady {
+                print("[TranscriptionViewModel] Denoiser unavailable; Whisper will use raw PCM")
+            }
+
+            // 3️⃣ WhisperKit 模型加载
+            setStatus(.checking("加载 WhisperKit 本地引擎..."))
+            whisperReady = await whisperKitService.configure(allowDownload: true, onProgress: { [weak self] fraction, status in
+                Task { @MainActor [weak self] in
+                    self?.downloadProgress = fraction
+                    self?.downloadStatus = status
+                    self?.setStatus(.checking(status))
+                }
+            })
             if !whisperReady {
                 downloadProgress = 0.0
-                downloadStatus = "WhisperKit large-v3 未检测到"
+                downloadStatus = "WhisperKit large-v3 下载或加载失败"
             }
             print("[TranscriptionViewModel] WhisperKit ready: \(whisperReady)")
 
-            // 3️⃣ Groq 核心 + NVIDIA 总结测试
+            // 4️⃣ Groq 核心 + NVIDIA 总结测试
             setStatus(.checking("测试 Groq 与 NVIDIA 总结..."))
             let groqResult = await llmService.testConnectivity(
                 credential: LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys)
@@ -207,6 +262,8 @@ final class TranscriptionViewModel: ObservableObject {
         dynamicItems = []
         whisperQueue = []
         llmFormatQueue = []
+        pendingLLMFormatBatch = []
+        sourceIDsByLLMPrimaryID = [:]
         organizerQueue = []
         transQueue = []
         liveSummaryText = ""
@@ -322,6 +379,7 @@ final class TranscriptionViewModel: ObservableObject {
         draftText = ""
         setStatus(.idle)
         statusMessage = wasRecording ? "正在整理详细总结..." : "麦克风已断开"
+        flushPendingLLMFormatBatchIfReady(force: true)
         if wasRecording {
             startFinalSessionSummaryAndWriteNotes()
         }
@@ -424,7 +482,12 @@ final class TranscriptionViewModel: ObservableObject {
         canRestart = false
         historyItems = []
         dynamicItems = []
+        whisperQueue = []
+        llmFormatQueue = []
+        pendingLLMFormatBatch = []
+        sourceIDsByLLMPrimaryID = [:]
         organizerQueue = []
+        transQueue = []
         draftText = ""
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
@@ -444,7 +507,12 @@ final class TranscriptionViewModel: ObservableObject {
         guard !isFinalizingSession else { return }
         historyItems = []
         dynamicItems = []
+        whisperQueue = []
+        llmFormatQueue = []
+        pendingLLMFormatBatch = []
+        sourceIDsByLLMPrimaryID = [:]
         organizerQueue = []
+        transQueue = []
         draftText = ""
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
@@ -503,6 +571,18 @@ final class TranscriptionViewModel: ObservableObject {
         enqueueWhisperItem(uid: uid, pcm: pcm, sherpaText: sherpaText)
     }
 
+    func enqueueLLMFormatCandidateForTesting(uid: UUID, text: String, sherpaText: String = "") {
+        enqueueLLMItem(uid: uid, text: text, sherpaText: sherpaText, taskType: .format)
+    }
+
+    func flushPendingLLMFormatBatchForTesting(force: Bool = true) {
+        flushPendingLLMFormatBatchIfReady(force: force)
+    }
+
+    var queuedLLMItemsForTesting: [LLMQueueItem] {
+        llmFormatQueue
+    }
+
     private func mergeIntoQueuedAccentAnalysisIfPossible(pcm: Data, sherpaText: String) -> Bool {
         guard WhisperKitService.isAccentAnalysisPlaceholder(sherpaText),
               let lastIndex = whisperQueue.indices.last,
@@ -515,19 +595,73 @@ final class TranscriptionViewModel: ObservableObject {
         return true
     }
 
-    private func enqueueLLMItem(uid: UUID, text: String, taskType: LLMTaskType) {
+    private func enqueueLLMItem(
+        uid: UUID,
+        text: String,
+        sherpaText: String = "",
+        taskType: LLMTaskType
+    ) {
         let item = LLMQueueItem(
             priority: taskType == .format ? 1 : 2,
             timestamp: Date().timeIntervalSince1970,
-            taskType: taskType, uid: uid, rawText: text
+            taskType: taskType,
+            uid: uid,
+            sourceIDs: [uid],
+            rawText: text,
+            whisperText: text,
+            sherpaText: sherpaText
         )
         if let idx = dynamicItems.firstIndex(where: { $0.id == uid }) {
             dynamicItems[idx].english = text
             dynamicItems[idx].status = taskType == .format ? .llmFormatting : .llmAggregating
         }
-        llmFormatQueue.append(item)
-        llmQueueSize = llmFormatQueue.count
+        if taskType == .format {
+            pendingLLMFormatBatch.append(item)
+            flushPendingLLMFormatBatchIfReady(force: !apiReady)
+        } else {
+            llmFormatQueue.append(item)
+        }
+        llmQueueSize = llmFormatQueue.count + pendingLLMFormatBatch.count
         renderUI(force: true)
+    }
+
+    private func flushPendingLLMFormatBatchIfReady(
+        force: Bool,
+        now: TimeInterval = Date().timeIntervalSince1970
+    ) {
+        guard !pendingLLMFormatBatch.isEmpty else { return }
+        let count = pendingLLMFormatBatch.count
+        let age = now - (pendingLLMFormatBatch.first?.timestamp ?? now)
+        let characterCount = pendingLLMFormatBatch.reduce(0) { $0 + $1.rawText.count }
+        guard force || count >= 3 || age >= 4.5 || characterCount >= 700 else { return }
+
+        let batch = pendingLLMFormatBatch
+        pendingLLMFormatBatch.removeAll()
+
+        let primary = batch[0]
+        let sourceIDs = batch.flatMap(\.sourceIDs)
+        let whisperLines = batch.enumerated()
+            .map { "\($0.offset + 1). \($0.element.whisperText)" }
+            .joined(separator: "\n")
+        let sherpaLines = batch.enumerated()
+            .map { "\($0.offset + 1). \($0.element.sherpaText.isEmpty ? $0.element.rawText : $0.element.sherpaText)" }
+            .joined(separator: "\n")
+        let rawBatch = batch.map(\.rawText).joined(separator: "\n")
+
+        sourceIDsByLLMPrimaryID[primary.uid] = sourceIDs
+        llmFormatQueue.append(
+            LLMQueueItem(
+                priority: primary.priority,
+                timestamp: primary.timestamp,
+                taskType: .format,
+                uid: primary.uid,
+                sourceIDs: sourceIDs,
+                rawText: rawBatch,
+                whisperText: whisperLines,
+                sherpaText: sherpaLines
+            )
+        )
+        llmQueueSize = llmFormatQueue.count + pendingLLMFormatBatch.count
     }
 
     private func enqueueTranslation(uid: UUID, text: String) {
@@ -536,7 +670,7 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - Workers
 
-    /// Whisper Worker：Groq Whisper API → WhisperKit 本地兜底（对应 Python whisper_cloud_local_worker）
+    /// Whisper Worker：WhisperKit 本地优先 → Groq Whisper 质量兜底
     private func startWhisperWorker() {
         whisperWorkerTask = Task { [weak self] in
             guard let self else { return }
@@ -555,33 +689,37 @@ final class TranscriptionViewModel: ObservableObject {
                 var finalText = sherpaBackup
 
                 if pcm.count >= 16000 {
-                    var whisperText: String? = nil
-
-                    // 1️⃣ Groq Whisper API
+                    let denoisedPCM = await self.speechDenoiserService.denoise(pcmData: pcm) ?? pcm
                     let groqKey = await MainActor.run { self.groqAPIKey() }
-                    if groqKey.hasPrefix("gsk_") {
-                        whisperText = await groqWhisperAPI(pcmData: pcm, apiKey: groqKey)
+                    let mode = await MainActor.run { self.whisperRefinementMode }
+                    var whisperText: String?
+
+                    switch mode {
+                    case .cloudFirst:
+                        if groqKey.hasPrefix("gsk_") {
+                            whisperText = await groqWhisperAPI(pcmData: denoisedPCM, apiKey: groqKey)
+                        }
+                        if !self.isUsableWhisperText(whisperText, sherpaBackup: sherpaBackup) {
+                            whisperText = await self.whisperKitService.transcribe(pcmData: denoisedPCM)
+                        }
+                    case .localOnly:
+                        whisperText = await self.whisperKitService.transcribe(pcmData: denoisedPCM)
+                    case .localFirst:
+                        whisperText = await self.whisperKitService.transcribe(pcmData: denoisedPCM)
+                        if !self.isUsableWhisperText(whisperText, sherpaBackup: sherpaBackup),
+                           groqKey.hasPrefix("gsk_") {
+                            whisperText = await groqWhisperAPI(pcmData: denoisedPCM, apiKey: groqKey)
+                        }
                     }
 
-                    // 2️⃣ WhisperKit 本地兜底
-                    if whisperText == nil {
-                        whisperText = await self.whisperKitService.transcribe(pcmData: pcm)
-                    }
-
-                    // 3️⃣ 兜底失败 → 用 Sherpa 文本
+                    // 兜底失败 → 用 Sherpa 文本
                     if whisperText == nil {
                         whisperText = sherpaBackup
                     }
 
-                    // 4️⃣ 质量检查
+                    // 质量检查
                     let wr = whisperText ?? ""
-                    let isHalluc = self.whisperKitService.isHallucination(wr)
-                    let lenRatio = Double(wr.count) / Double(max(1, sherpaBackup.count))
-                    let isTooShort = lenRatio < 0.4
-                    let isTooLong  = lenRatio > 2.5
-                    let hasRepeats  = self.whisperKitService.hasRepeatedPhrase(wr)
-
-                    if wr.isEmpty || isHalluc || isTooShort || isTooLong || hasRepeats {
+                    if !self.isUsableWhisperText(wr, sherpaBackup: sherpaBackup) {
                         if !sherpaBackup.contains("捕获到口音") {
                             finalText = sherpaBackup
                         } else {
@@ -599,11 +737,26 @@ final class TranscriptionViewModel: ObservableObject {
                     await MainActor.run { self.markAsDropped(uid: uid) }
                 } else {
                     await MainActor.run {
-                        self.enqueueLLMItem(uid: uid, text: finalText, taskType: .format)
+                        self.enqueueLLMItem(
+                            uid: uid,
+                            text: finalText,
+                            sherpaText: sherpaBackup,
+                            taskType: .format
+                        )
                     }
                 }
             }
         }
+    }
+
+    private func isUsableWhisperText(_ text: String?, sherpaBackup: String) -> Bool {
+        let wr = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wr.isEmpty else { return false }
+        if whisperKitService.isHallucination(wr) { return false }
+        if whisperKitService.hasRepeatedPhrase(wr) { return false }
+        let lenRatio = Double(wr.count) / Double(max(1, sherpaBackup.count))
+        if lenRatio < 0.4 || lenRatio > 2.5 { return false }
+        return true
     }
 
     private func startLLMWorker() {
@@ -612,12 +765,13 @@ final class TranscriptionViewModel: ObservableObject {
             await self.llmService.start()
             while !Task.isCancelled {
                 let item: LLMQueueItem? = await MainActor.run {
+                    self.flushPendingLLMFormatBatchIfReady(force: false)
                     guard !self.llmFormatQueue.isEmpty else { return nil }
                     self.llmFormatQueue.sort {
                         $0.priority != $1.priority ? $0.priority < $1.priority : $0.timestamp < $1.timestamp
                     }
                     let i = self.llmFormatQueue.removeFirst()
-                    self.llmQueueSize = self.llmFormatQueue.count
+                    self.llmQueueSize = self.llmFormatQueue.count + self.pendingLLMFormatBatch.count
                     return i
                 }
                 guard let item, let course = self.currentCourse else {
@@ -795,6 +949,11 @@ final class TranscriptionViewModel: ObservableObject {
     // MARK: - 结果处理
 
     func postProcessResult(uid: UUID, finalText: String) {
+        let consumedSourceIDs = sourceIDsByLLMPrimaryID.removeValue(forKey: uid) ?? [uid]
+        for sourceID in consumedSourceIDs where sourceID != uid {
+            hideOrganizerItem(uid: sourceID)
+        }
+
         var t = finalText
             .replacingOccurrences(of: "\\.{2,}", with: " ", options: .regularExpression)
             .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
@@ -944,13 +1103,59 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - 文件
 
+    func chooseNoteDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择"
+        panel.message = "选择同声传译笔记保存位置"
+        panel.directoryURL = Self.noteDirectory(from: noteDirectoryPath)
+
+        if panel.runModal() == .OK, let selected = panel.url {
+            noteDirectoryPath = selected.standardizedFileURL.path
+        }
+    }
+
+    func resetNoteDirectoryToDesktop() {
+        noteDirectoryPath = ""
+    }
+
     private func setupFilePath() {
-        let desktop = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd_HH-mm"
         let dateStr = df.string(from: Date())
         guard let course = currentCourse else { return }
-        filePath = desktop.appendingPathComponent("\(course.abbrev)_Session_\(dateStr).txt")
+        let directory = Self.ensureWritableNoteDirectory(noteDirectoryPath)
+        filePath = directory.appendingPathComponent("\(course.abbrev)_Session_\(dateStr).txt")
+    }
+
+    nonisolated static func noteDirectory(from storedPath: String) -> URL {
+        let trimmed = storedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return defaultNoteDirectory() }
+        return expandedUserPath(trimmed).standardizedFileURL
+    }
+
+    nonisolated private static func ensureWritableNoteDirectory(_ storedPath: String) -> URL {
+        let candidate = noteDirectory(from: storedPath)
+        do {
+            try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: true)
+            return candidate
+        } catch {
+            let fallback = defaultNoteDirectory()
+            try? FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
+            return fallback
+        }
+    }
+
+    nonisolated private static func defaultNoteDirectory() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+    }
+
+    nonisolated private static func expandedUserPath(_ path: String) -> URL {
+        let expanded = (path as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded, isDirectory: true)
     }
 
     private func syncFile() {

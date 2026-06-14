@@ -287,6 +287,7 @@ actor TranslationService {
     // MARK: - LLM 翻译
 
     private func llmTranslate(_ text: String, credential: LLMProviderCredential) async -> String? {
+        await ChatRateLimiter.shared.waitTurn(for: credential)
         var req = URLRequest(url: credential.provider.chatCompletionsURL)
         req.httpMethod = "POST"
         req.timeoutInterval = min(credential.provider.timeout, Self.llmTranslateTimeout)
@@ -306,7 +307,9 @@ actor TranslationService {
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let http = resp as? HTTPURLResponse else { return nil }
+        await ChatRateLimiter.shared.noteHTTPStatus(http.statusCode, for: credential)
+        guard http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let msg = choices.first?["message"] as? [String: Any],

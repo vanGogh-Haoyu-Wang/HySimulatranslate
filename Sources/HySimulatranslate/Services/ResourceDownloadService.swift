@@ -23,6 +23,12 @@ enum ResourceDownloadService {
     static let sherpaModelArchiveURL = URL(
         string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\(AppResourceLocator.sherpaModelFolderName).tar.bz2"
     )!
+    static let vadModelURL = URL(
+        string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\(AppResourceLocator.vadModelFileName)"
+    )!
+    static let speechDenoiserModelURL = URL(
+        string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/\(AppResourceLocator.speechDenoiserModelFileName)"
+    )!
 
     static func ensureSherpaModel(
         supportDirectory: URL = AppResourceLocator.defaultSupportDirectory(),
@@ -76,6 +82,77 @@ enum ResourceDownloadService {
         }
         try FileManager.default.moveItem(at: extracted, to: destination)
         onProgress?(1.0, "Sherpa 模型已下载")
+        return destination
+    }
+
+    static func ensureVADModel(
+        supportDirectory: URL = AppResourceLocator.defaultSupportDirectory(),
+        bundledPayloadDirectory: URL? = AppResourceLocator.bundledPayloadDirectory(),
+        fileURL: URL = vadModelURL,
+        onProgress: ProgressHandler? = nil
+    ) async throws -> URL {
+        if let existing = AppResourceLocator.vadModelFile(
+            supportDirectory: supportDirectory,
+            bundledPayloadDirectory: bundledPayloadDirectory
+        ) {
+            onProgress?(1.0, "VAD 模型已就绪")
+            return existing
+        }
+
+        return try await ensureSingleFileModel(
+            relativePath: AppResourceLocator.vadModelRelativePath,
+            sourceURL: fileURL,
+            supportDirectory: supportDirectory,
+            statusName: "VAD",
+            onProgress: onProgress
+        )
+    }
+
+    static func ensureSpeechDenoiserModel(
+        supportDirectory: URL = AppResourceLocator.defaultSupportDirectory(),
+        bundledPayloadDirectory: URL? = AppResourceLocator.bundledPayloadDirectory(),
+        fileURL: URL = speechDenoiserModelURL,
+        onProgress: ProgressHandler? = nil
+    ) async throws -> URL {
+        if let existing = AppResourceLocator.speechDenoiserModelFile(
+            supportDirectory: supportDirectory,
+            bundledPayloadDirectory: bundledPayloadDirectory
+        ) {
+            onProgress?(1.0, "降噪模型已就绪")
+            return existing
+        }
+
+        return try await ensureSingleFileModel(
+            relativePath: AppResourceLocator.speechDenoiserModelRelativePath,
+            sourceURL: fileURL,
+            supportDirectory: supportDirectory,
+            statusName: "降噪",
+            onProgress: onProgress
+        )
+    }
+
+    private static func ensureSingleFileModel(
+        relativePath: String,
+        sourceURL: URL,
+        supportDirectory: URL,
+        statusName: String,
+        onProgress: ProgressHandler?
+    ) async throws -> URL {
+        let destination = supportDirectory.appendingRelativePathForResourceDownload(relativePath)
+        let downloads = supportDirectory.appendingPathComponent("Downloads", isDirectory: true)
+        let temporaryDestination = downloads.appendingPathComponent(destination.lastPathComponent)
+
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        onProgress?(0.1, "正在下载 \(statusName) 模型...")
+        let downloaded = try await downloadFile(from: sourceURL)
+        try replaceItem(at: temporaryDestination, with: downloaded)
+        try replaceItem(at: destination, with: temporaryDestination)
+        onProgress?(1.0, "\(statusName) 模型已下载")
         return destination
     }
 

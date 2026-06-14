@@ -20,6 +20,18 @@ struct TranscriptionView: View {
             ? courseDB.allSubjects[courseIndex].name
             : "Unknown"
     }
+    private var noteDirectoryBinding: Binding<String> {
+        Binding(
+            get: {
+                vm.noteDirectoryPath.isEmpty
+                    ? vm.defaultNoteDirectoryPath
+                    : vm.noteDirectoryPath
+            },
+            set: { newValue in
+                vm.noteDirectoryPath = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        )
+    }
 
     var body: some View {
         ZStack {
@@ -282,6 +294,40 @@ struct TranscriptionView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
+                Label("Whisper 精校", systemImage: "waveform.and.magnifyingglass")
+                Picker("Whisper 精校", selection: $vm.whisperRefinementModeRaw) {
+                    ForEach(WhisperRefinementMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .disabled(vm.isRecording)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("笔记位置", systemImage: "folder")
+                HStack(spacing: 8) {
+                    TextField("笔记保存路径", text: noteDirectoryBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1)
+                    Button {
+                        vm.chooseNoteDirectory()
+                    } label: {
+                        Image(systemName: "folder.badge.gearshape")
+                    }
+                    .help("选择笔记文件夹")
+                    Button {
+                        vm.resetNoteDirectoryToDesktop()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                    }
+                    .help("恢复桌面")
+                }
+                .disabled(vm.isRecording || vm.isFinalizingSession)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
                 Label("外观", systemImage: "circle.lefthalf.filled")
                 Picker("外观", selection: $appearanceMode) {
                     ForEach(AppearanceMode.allCases) { mode in
@@ -293,7 +339,7 @@ struct TranscriptionView: View {
             }
         }
         .padding(16)
-        .frame(width: 280)
+        .frame(width: 400)
         .background(.regularMaterial)
     }
 

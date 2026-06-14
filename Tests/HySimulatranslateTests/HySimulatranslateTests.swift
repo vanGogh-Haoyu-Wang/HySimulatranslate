@@ -867,4 +867,116 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(vm.canRestart)
         XCTAssertEqual(vm.liveSummaryStatus, "已写入笔记")
     }
+
+    func testVADAndDenoiserResourcesPreferApplicationSupportFiles() throws {
+        let root = try makeTemporaryDirectory()
+        let support = root.appendingPathComponent("Support")
+        let payload = root
+            .appendingPathComponent("Bundle")
+            .appendingPathComponent(AppResourceLocator.payloadDirectoryName)
+        let supportVAD = support.appendingPathComponent(AppResourceLocator.vadModelRelativePath)
+        let payloadDenoiser = payload.appendingPathComponent(AppResourceLocator.speechDenoiserModelRelativePath)
+
+        try FileManager.default.createDirectory(at: supportVAD.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: payloadDenoiser.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("vad".utf8).write(to: supportVAD)
+        try Data("denoiser".utf8).write(to: payloadDenoiser)
+
+        XCTAssertEqual(
+            AppResourceLocator.vadModelFile(
+                supportDirectory: support,
+                bundledPayloadDirectory: payload
+            )?.standardizedFileURL.path,
+            supportVAD.standardizedFileURL.path
+        )
+        XCTAssertEqual(
+            AppResourceLocator.speechDenoiserModelFile(
+                supportDirectory: support,
+                bundledPayloadDirectory: payload
+            )?.standardizedFileURL.path,
+            payloadDenoiser.standardizedFileURL.path
+        )
+    }
+
+    func testLLMPromptUsesWhisperAsPrimaryAndSherpaAsReference() {
+        let promptSource = LLMService.sourceTextForPrompt(
+            rawText: "Whisper transcript.",
+            whisperText: "WhisperKit recovered the technical phrase.",
+            sherpaText: "Sherpa draft recovered the technical phrase."
+        )
+
+        XCTAssertTrue(promptSource.contains("WhisperKit primary transcript"))
+        XCTAssertTrue(promptSource.contains("Sherpa draft reference"))
+        XCTAssertTrue(promptSource.contains("WhisperKit recovered the technical phrase."))
+        XCTAssertTrue(promptSource.contains("Sherpa draft recovered the technical phrase."))
+    }
+
+    @MainActor
+    func testLLMFormatCandidatesBatchBeforeQueuedReview() {
+        let vm = TranscriptionViewModel()
+        vm.apiReady = true
+        let first = UUID()
+        let second = UUID()
+        let third = UUID()
+
+        vm.enqueueLLMFormatCandidateForTesting(
+            uid: first,
+            text: "Whisper first.",
+            sherpaText: "Sherpa first."
+        )
+        vm.enqueueLLMFormatCandidateForTesting(
+            uid: second,
+            text: "Whisper second.",
+            sherpaText: "Sherpa second."
+        )
+
+        XCTAssertEqual(vm.queuedLLMItemsForTesting.count, 0)
+        XCTAssertEqual(vm.llmQueueSize, 2)
+
+        vm.enqueueLLMFormatCandidateForTesting(
+            uid: third,
+            text: "Whisper third.",
+            sherpaText: "Sherpa third."
+        )
+
+        let queued = vm.queuedLLMItemsForTesting
+        XCTAssertEqual(queued.count, 1)
+        XCTAssertEqual(queued.first?.sourceIDs, [first, second, third])
+        XCTAssertTrue(queued.first?.whisperText.contains("1. Whisper first.") == true)
+        XCTAssertTrue(queued.first?.sherpaText.contains("3. Sherpa third.") == true)
+        XCTAssertEqual(vm.llmQueueSize, 1)
+    }
+
+    func testChatRateLimiterPolicyUsesConservativeBatchingNearLimit() {
+        XCTAssertFalse(
+            ChatRateLimiter.shouldUseConservativeBatching(
+                currentRPM: 10,
+                queueDepth: 1,
+                recentlyRateLimited: false
+            )
+        )
+        XCTAssertTrue(
+            ChatRateLimiter.shouldUseConservativeBatching(
+                currentRPM: ChatRateLimiter.targetRPM,
+                queueDepth: 1,
+                recentlyRateLimited: false
+            )
+        )
+        XCTAssertEqual(ChatRateLimiter.targetBatchSize(conservative: false), 3)
+        XCTAssertEqual(ChatRateLimiter.targetBatchSize(conservative: true), 5)
+    }
+
+    func testNoteDirectoryDefaultsToDesktopAndExpandsTilde() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
+        let desktop = home.appendingPathComponent("Desktop", isDirectory: true).standardizedFileURL
+
+        XCTAssertEqual(
+            TranscriptionViewModel.noteDirectory(from: "").standardizedFileURL.path,
+            desktop.path
+        )
+        XCTAssertEqual(
+            TranscriptionViewModel.noteDirectory(from: "~/HySimulatranslateNotes").standardizedFileURL.path,
+            home.appendingPathComponent("HySimulatranslateNotes", isDirectory: true).standardizedFileURL.path
+        )
+    }
 }

@@ -12,7 +12,7 @@
 
 ## 功能
 
-- **实时语音转写** — sherpa-onnx 流式识别 + WhisperKit large-v3 本地精校，双引擎兜底
+- **实时语音转写** — sherpa-onnx 原始音频实时蹦字 + 本地 VAD/降噪旁路 + WhisperKit large-v3 本地精校
 - **LLM 文本格式化** — Groq API（llama-3.3-70b-versatile）智能修复标点、ASR 错误、句子拼接
 - **中英同传** — 从英文语音到中文译文的完整流水线
 - **强化专项** — 自定义学科关键词与会议 focus，提升专业术语识别准确率
@@ -29,10 +29,14 @@
   │  16kHz int16 PCM
   ▼
 sherpa-onnx 实时流式识别 ──→ draft text（蹦字区实时预览）
-  │  segment + PCM 缓存
+  │
+  ├─→ VAD + 本地降噪旁路（只用于切段和 Whisper 精校）
+  │      │ 300-500ms pre-roll + 500-700ms hangover
+  │      ▼
+  │    WhisperKit large-v3 本地优先精校
+  │      │ 仅在本地失败/质量差/云端优先模式时调用 Groq Whisper
   ▼
-WhisperKit large-v3 本地精校
-  │  (可选: Groq Whisper API 云端兜底)
+动态候选区 ──→ Sherpa 草稿 + Whisper 候选 + 处理状态
   ▼
 Groq LLM 格式化 / 合并 ──→ 纠错、去重、分句
   │
@@ -56,7 +60,7 @@ NVIDIA 实时总结 ──→ 中文摘要
 | **架构** | Apple Silicon (M1/M2/M3/M4) 或 Intel (需测试) |
 | **麦克风** | 系统麦克风权限 |
 | **网络** | 使用云端 LLM (Groq/NVIDIA) 需要网络连接；纯本地模式可选 |
-| **存储** | ~3 GB（sherpa-onnx 模型 + WhisperKit large-v3 模型） |
+| **存储** | ~3 GB（sherpa-onnx 模型 + WhisperKit large-v3 模型 + VAD/降噪模型） |
 
 ---
 
@@ -70,13 +74,22 @@ NVIDIA 实时总结 ──→ 中文摘要
 ### sherpa-onnx 流式模型
 默认打包源路径：
 ```
-~/Library/Application Support/SherpaOnnxModel/sherpa-onnx-streaming-zipformer-en-2023-06-26/
+~/Library/Application Support/HySimulatranslate/Models/Sherpa/sherpa-onnx-streaming-zipformer-en-2023-06-26/
 ```
 
 ### WhisperKit large-v3 模型
 默认打包源路径：
 ```
-~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-large-v3/
+~/Library/Application Support/HySimulatranslate/Models/WhisperKit/openai_whisper-large-v3/
+```
+
+WhisperKit 默认下载优化的 large-v3 变体 `large-v3-v20240930_626MB`，并继续兼容既有 `openai_whisper-large-v3` 目录。
+
+### VAD 与降噪模型
+默认打包源路径：
+```
+~/Library/Application Support/HySimulatranslate/Models/VAD/silero_vad.onnx
+~/Library/Application Support/HySimulatranslate/Models/Denoise/gtcrn_simple.onnx
 ```
 
 ### sherpa-onnx C 库
@@ -95,11 +108,13 @@ cd HySimulatranslate
 
 ### 2. 放置 sherpa-onnx 动态库
 
-确保 `Libraries/sherpa-onnx/lib/` 包含以下文件：
-- `libsherpa-onnx-c-api.dylib`
-- `libonnxruntime.dylib`
+可以直接运行：
 
-> 这些文件未包含在仓库中（体积较大），请从 [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases) 下载对应 macOS 版本并放入该目录。
+```bash
+bash script/download_dependencies.sh --all
+```
+
+脚本会自动下载 sherpa-onnx 动态库、Sherpa 流式模型、Silero VAD、GTCRN 降噪模型和 WhisperKit large-v3 模型。
 
 ### 3. 编译
 
@@ -137,6 +152,8 @@ DMG 打开后，将 `HySimulatranslate.app` 拖到 `Applications`。这是第三
 ```bash
 SHERPA_MODEL_SOURCE="/path/to/sherpa-model" \
 WHISPER_MODEL_SOURCE="/path/to/openai_whisper-large-v3" \
+VAD_MODEL_SOURCE="/path/to/silero_vad.onnx" \
+DENOISER_MODEL_SOURCE="/path/to/gtcrn_simple.onnx" \
 bash script/package_dmg.sh --verify
 ```
 
@@ -160,17 +177,19 @@ bash script/package_dmg.sh --verify
 |------|------|
 | **顶部状态栏** | 课程名、引擎状态、麦克风设备、队列大小（W=Whisper, L=LLM）、控制按钮 |
 | **左侧历史面板** | 已确认的转写+翻译结果，自动滚动 |
-| **右侧上部蹦字区** | 实时 ASR 识别文字 + 处理状态标签 |
+| **右侧上部动态区** | 实时 Sherpa 蹦字、VAD/Whisper 候选文本、Whispering/Refining/Translating 状态 |
 | **右侧下部总结区** | NVIDIA 实时会议总结 |
 
 ### 设置项
 
 - **停顿时间** (0.2s–1.5s) — 控制 sherpa-onnx 的语音分段灵敏度
+- **Whisper 精校** — 本地优先 / 云端优先 / 仅本地
+- **笔记位置** — 默认桌面，可改为任意本地文件夹
 - **外观** — 跟随系统 / 深色 / 浅色
 
 ### 笔记文件
 
-每场会话自动在桌面生成：
+每场会话默认在桌面生成，也可在同传页设置中修改保存文件夹：
 ```
 {课程缩写}_Session_{日期时间}.txt
 ```
@@ -216,6 +235,10 @@ HySimulatranslate/
 │           ├── SpeechEngine.swift       # AVAudioEngine 音频采集
 │           ├── SherpaService.swift      # sherpa-onnx 流式识别
 │           ├── WhisperKitService.swift  # WhisperKit 本地精校
+│           ├── VoiceActivityService.swift  # 本地 VAD 封装
+│           ├── SpeechDenoiserService.swift # 本地降噪封装
+│           ├── ChatRateLimiter.swift    # Groq 聊天请求限流
+│           ├── ResourceDownloadService.swift # 模型自动下载
 │           ├── LLMService.swift         # Groq LLM 格式化
 │           ├── TranslationService.swift # 翻译服务
 │           ├── NvidiaSummaryService.swift  # NVIDIA 总结
