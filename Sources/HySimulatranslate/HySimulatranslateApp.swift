@@ -18,7 +18,7 @@ struct HySimulatranslateApp: App {
         WindowGroup {
             ContentView()
         }
-        .windowToolbarStyle(.unified)
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultSize(width: 1440, height: 800)
     }

@@ -47,8 +47,34 @@ struct GlassWindowConfigurator: NSViewRepresentable {
         window.styleMask.insert(.fullSizeContentView)
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unified
-        window.toolbar?.showsBaselineSeparator = false
+        window.toolbar = nil
+        alignTrafficLightButtons(in: window)
+    }
+
+    private func alignTrafficLightButtons(in window: NSWindow) {
+        let buttons = [
+            window.standardWindowButton(.closeButton),
+            window.standardWindowButton(.miniaturizeButton),
+            window.standardWindowButton(.zoomButton)
+        ].compactMap { $0 }
+
+        guard let container = buttons.first?.superview else { return }
+
+        let leftInset: CGFloat = 16
+        let topInset: CGFloat = 16
+        let currentLeading = buttons.map(\.frame.minX).min() ?? leftInset
+        let horizontalShift = leftInset - currentLeading
+
+        for button in buttons {
+            var frame = button.frame
+            frame.origin.x += horizontalShift
+            if container.isFlipped {
+                frame.origin.y = topInset
+            } else {
+                frame.origin.y = max(0, container.bounds.height - frame.height - topInset)
+            }
+            button.frame = frame
+        }
     }
 }
 

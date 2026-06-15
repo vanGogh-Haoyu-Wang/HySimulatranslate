@@ -22,9 +22,12 @@ struct TranscriptionView: View {
     private let leftRatio: CGFloat = 3
     private let centerRatio: CGFloat = 7
     private let rightRatio: CGFloat = 4
-    private let titlebarLeadingPadding: CGFloat = 18
+    private let titlebarLeadingPadding: CGFloat = 16
     // SwiftUI points, not screenshot pixels; keeps title text clear of macOS titlebar controls.
-    private let collapsedTitlebarLeadingPadding: CGFloat = 156
+    private let collapsedTitlebarLeadingPadding: CGFloat = 162
+    private let titlebarControlsLeadingPadding: CGFloat = 92
+    private let titlebarControlsTopPadding: CGFloat = 10
+    private let titlebarControlSize: CGFloat = 22
     private let unBlue = Color(red: 0.255, green: 0.561, blue: 0.871)
     private let draftBlue = Color(red: 0.0, green: 0.478, blue: 1.0)
 
@@ -72,6 +75,11 @@ struct TranscriptionView: View {
         )
     }
 
+    private var canReturnToTranscription: Bool {
+        (workspaceMode == .settings || workspaceMode == .courseSelection)
+            && !courseDB.allSubjects.isEmpty
+    }
+
     static func shouldShowProviderCheckStrip(
         isRecording: Bool,
         isFinalizingSession: Bool,
@@ -102,7 +110,7 @@ struct TranscriptionView: View {
                         noteHistorySidebar()
                             .frame(width: leftWidth)
                             .padding(.leading, leftInset)
-                            .padding(.top, 56)
+                            .padding(.top, 38)
                             .padding(.bottom, 6)
                             .transition(.move(edge: .leading).combined(with: .opacity))
                     }
@@ -112,20 +120,14 @@ struct TranscriptionView: View {
                 }
             }
             .ignoresSafeArea(.container, edges: [.top, .trailing])
+
+            titlebarNavigationControls
+                .padding(.leading, titlebarControlsLeadingPadding)
+                .padding(.top, titlebarControlsTopPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .ignoresSafeArea(.container, edges: .top)
         }
         .frame(minWidth: 1320, minHeight: 720)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    withAnimation(.snappy) {
-                        isLeftSidebarCollapsed.toggle()
-                    }
-                } label: {
-                    Image(systemName: isLeftSidebarCollapsed ? "sidebar.left" : "sidebar.leading")
-                }
-                .help(isLeftSidebarCollapsed ? "展开历史记录区" : "收起历史记录区")
-            }
-        }
         .sheet(isPresented: $showingAddSubject) {
             AddSubjectView(courseDB: courseDB)
         }
@@ -161,6 +163,36 @@ struct TranscriptionView: View {
     }
 
     // MARK: - 左侧笔记历史
+
+    private var titlebarNavigationControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.snappy) {
+                    isLeftSidebarCollapsed.toggle()
+                }
+            } label: {
+                Image(systemName: isLeftSidebarCollapsed ? "sidebar.left" : "sidebar.leading")
+                    .font(.system(size: 13, weight: .regular))
+                    .frame(width: titlebarControlSize, height: titlebarControlSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary.opacity(0.85))
+            .help(isLeftSidebarCollapsed ? "展开历史记录区" : "收起历史记录区")
+
+            Button {
+                workspaceMode = .transcription
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 13, weight: .regular))
+                    .frame(width: titlebarControlSize, height: titlebarControlSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary.opacity(0.85))
+            .help(canReturnToTranscription ? "返回当前同传" : "当前已在同传主界面")
+        }
+    }
 
     private func noteHistorySidebar() -> some View {
         VStack(spacing: 12) {
@@ -327,7 +359,7 @@ struct TranscriptionView: View {
 
             HStack(spacing: 12) {
                 Text(courseName)
-                    .font(.headline)
+                    .font(.callout.weight(.semibold))
                     .lineLimit(1)
 
                 statusBadge
@@ -352,6 +384,7 @@ struct TranscriptionView: View {
                     }
                 } label: {
                     Image(systemName: isSummaryPaneCollapsed ? "sidebar.right" : "sidebar.trailing")
+                        .font(.caption)
                 }
                 .buttonStyle(.borderless)
                 .help(isSummaryPaneCollapsed ? "展开笔记总结区" : "收起笔记总结区")
@@ -363,6 +396,7 @@ struct TranscriptionView: View {
                         }
                     } label: {
                         Image(systemName: "xmark.circle")
+                            .font(.caption)
                     }
                     .buttonStyle(.borderless)
                     .help("关闭历史笔记预览")
@@ -371,7 +405,7 @@ struct TranscriptionView: View {
             .padding(.trailing, 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, minHeight: 54, maxHeight: 54, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 42, maxHeight: 42, alignment: .leading)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(.white.opacity(0.10))
@@ -475,14 +509,6 @@ struct TranscriptionView: View {
     private var courseSelectionPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Button {
-                    workspaceMode = .transcription
-                } label: {
-                    Label("返回", systemImage: "chevron.left")
-                }
-                .buttonStyle(.bordered)
-                .disabled(courseDB.allSubjects.isEmpty)
-
                 Text("强化专项")
                     .font(.title3.weight(.semibold))
 
@@ -695,7 +721,7 @@ struct TranscriptionView: View {
     // MARK: - 蹦字输入框
 
     private var dynamicInputPanel: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 7) {
@@ -723,7 +749,7 @@ struct TranscriptionView: View {
                                 .font(.title3)
                                 .foregroundColor(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 24)
+                                .padding(.top, 8)
                         }
 
                         Color.clear.frame(height: 1).id("dynamic-bottom")
@@ -742,11 +768,15 @@ struct TranscriptionView: View {
             }
 
             HStack(spacing: 10) {
+                Text("HySimulatranslate powered by Haoyu Wang")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary.opacity(0.72))
+                    .lineLimit(1)
                 Spacer()
                 controlStrip
             }
             .padding(.horizontal, 10)
-            .padding(.bottom, 10)
+            .padding(.bottom, 4)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 154)
@@ -831,13 +861,6 @@ struct TranscriptionView: View {
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Button {
-                    workspaceMode = .transcription
-                } label: {
-                    Label("返回", systemImage: "chevron.left")
-                }
-                .buttonStyle(.bordered)
-
                 Text("设置")
                     .font(.title3.weight(.semibold))
 
@@ -1119,7 +1142,8 @@ struct TranscriptionView: View {
     private var statusBadge: some View {
         HStack(spacing: 4) {
             Circle().frame(width: 6, height: 6).foregroundColor(statusColor)
-            Text(statusLabel).font(.caption.bold())
+            Text(statusLabel)
+                .font(.caption.weight(.semibold))
         }
     }
 

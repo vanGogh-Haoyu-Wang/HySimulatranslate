@@ -21,6 +21,7 @@ struct ContentView: View {
             selectedCourseIndex: $selectedCourseIndex
         )
         .background(GlassWindowConfigurator())
+        .ignoresSafeArea(.container, edges: .top)
         .onAppear {
             applyAppearance(appearanceMode)
             initializeWorkspaceIfNeeded()
