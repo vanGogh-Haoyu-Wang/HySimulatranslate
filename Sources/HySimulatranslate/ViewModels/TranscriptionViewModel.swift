@@ -21,6 +21,7 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var micVolume: Float = 0.0
     @Published var downloadProgress: Double = 0.0
     @Published var downloadStatus: String = ""
+    @Published var microphoneReady = false
     @Published var sherpaReady = false
     @Published var whisperReady = false
     @Published var apiReady = false
@@ -30,8 +31,22 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var liveSummaryReady = false
     @Published var isLiveSummaryUpdating = false
     @Published var isFinalizingSession = false
+    @Published var groqModelOptions: [LLMProviderModel] = LLMProviderCatalog.models(for: .groq)
+    @Published var nvidiaSummaryModelOptions: [LLMProviderModel] = LLMProviderCatalog.models(for: .nvidia)
+    @Published var isRefreshingProviderModels = false
+    @Published var providerModelRefreshStatus = ""
+    @Published var noteRecords: [NoteRecord] = []
+    @Published var selectedNoteRecord: NoteRecord?
+    @Published var notePreviewText: String = ""
+    @Published var notePreviewStatus: String = ""
     @AppStorage("whisperRefinementMode") var whisperRefinementModeRaw = WhisperRefinementMode.localFirst.rawValue
     @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
+    @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
+    @AppStorage("groqCoreModelName") var groqCoreModelName: String = LLMProviderCatalog.defaultGroqModelName
+    @AppStorage("nvidiaSummaryModelName") var nvidiaSummaryModelName: String = LLMProviderCatalog.defaultNvidiaSummaryModelName
+    @AppStorage("groqModelOptionsJSON") private var groqModelOptionsJSON: String = ""
+    @AppStorage("nvidiaSummaryModelOptionsJSON") private var nvidiaSummaryModelOptionsJSON: String = ""
+    @AppStorage("providerModelConnectivityRecordsJSON") private var providerModelConnectivityRecordsJSON: String = ""
 
     var providerAPIKeys: [LLMProviderID: String] = [:]
     var currentCourse: CourseSubject?
@@ -41,17 +56,27 @@ final class TranscriptionViewModel: ObservableObject {
         get { WhisperRefinementMode(rawValue: whisperRefinementModeRaw) ?? .localFirst }
         set { whisperRefinementModeRaw = newValue.rawValue }
     }
+    var noteFileFormat: NoteFileFormat {
+        get { NoteFileFormat(rawValue: noteFileFormatRaw) ?? .markdown }
+        set { noteFileFormatRaw = newValue.rawValue }
+    }
     var defaultNoteDirectoryPath: String {
         Self.defaultNoteDirectory().path
     }
     var effectiveNoteDirectoryPath: String {
         Self.noteDirectory(from: noteDirectoryPath).path
     }
+    var selectedProviderModelNames: [LLMProviderID: String] {
+        [
+            .groq: groqCoreModelName,
+            .nvidia: nvidiaSummaryModelName
+        ]
+    }
 
     var canStartTranscription: Bool {
         guard !isFinalizingSession else { return false }
         guard case .ready = engineStatus else { return false }
-        return sherpaReady && whisperReady
+        return microphoneReady && sherpaReady && whisperReady
     }
 
     var startTranscriptionButtonTitle: String {
@@ -66,6 +91,7 @@ final class TranscriptionViewModel: ObservableObject {
     private let llmService = LLMService()
     private let translationService = TranslationService()
     private let nvidiaSummaryService = NvidiaSummaryService()
+    private let modelDiscoveryService = LLMModelDiscoveryService()
 
     // 队列
     private var whisperQueue: [WhisperQueueItem] = []
@@ -84,6 +110,7 @@ final class TranscriptionViewModel: ObservableObject {
     private var liveSummaryCursor = LiveSummaryCursor()
     private var filePath: URL?
     private var isRunning = false
+    private var providerModelConnectivityRecords: [String: LLMProviderModelConnectivityRecord] = [:]
 
     // Worker handles
     private var whisperWorkerTask: Task<Void, Never>?
@@ -105,6 +132,75 @@ final class TranscriptionViewModel: ObservableObject {
 
     private var isChecking = false
 
+    init() {
+        providerModelConnectivityRecords = Self.decodeConnectivityRecords(from: providerModelConnectivityRecordsJSON)
+        groqModelOptions = normalizedProviderModelOptions(
+            for: .groq,
+            models: Self.decodeModels(from: groqModelOptionsJSON) ?? LLMProviderCatalog.models(for: .groq)
+        )
+        nvidiaSummaryModelOptions = normalizedProviderModelOptions(
+            for: .nvidia,
+            models: Self.decodeModels(from: nvidiaSummaryModelOptionsJSON) ?? LLMProviderCatalog.models(for: .nvidia)
+        )
+    }
+
+    func updateProviderAPIKeys(_ keys: [LLMProviderID: String]) {
+        providerAPIKeys = keys
+        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
+            from: providerAPIKeys,
+            testedResults: providerCheckResults,
+            selectedModelNames: selectedProviderModelNames
+        )
+    }
+
+    func selectCourse(_ subject: CourseSubject) {
+        guard !isRecording, !isFinalizingSession else { return }
+        currentCourse = subject
+        if case .idle = engineStatus {
+            statusMessage = "已选择 \(subject.name)"
+        } else if case .ready = engineStatus {
+            setStatus(translationEnabled
+                ? .ready("🟢 已选择 \(subject.name)，随时可启动")
+                : .ready("🟢 已选择 \(subject.name)（本地模式）"))
+        }
+    }
+
+    func refreshNoteRecords() {
+        noteRecords = Self.scanNoteRecords(in: Self.noteDirectory(from: noteDirectoryPath))
+    }
+
+    func loadNotePreview(_ record: NoteRecord) async {
+        selectedNoteRecord = record
+        notePreviewStatus = "读取中"
+        do {
+            let text = try await Task.detached(priority: .userInitiated) {
+                try String(contentsOf: record.url, encoding: .utf8)
+            }.value
+            selectedNoteRecord = record
+            notePreviewText = text
+            notePreviewStatus = "已载入"
+        } catch {
+            selectedNoteRecord = record
+            notePreviewText = ""
+            notePreviewStatus = "读取失败：\(error.localizedDescription)"
+        }
+    }
+
+    func startNewRecordWithoutSelfCheck() {
+        guard !isRecording, !isFinalizingSession else { return }
+        clearDisplayHistory()
+        selectedNoteRecord = nil
+        notePreviewText = ""
+        notePreviewStatus = ""
+        filePath = nil
+        if microphoneReady && sherpaReady && whisperReady {
+            setStatus(translationEnabled
+                ? .ready("🟢 新记录已准备，随时可启动")
+                : .ready("🟢 新记录已准备（本地模式）"))
+        }
+        refreshNoteRecords()
+    }
+
     func runSystemCheck() {
         guard !isChecking else { return }
         guard let course = currentCourse else {
@@ -114,18 +210,38 @@ final class TranscriptionViewModel: ObservableObject {
         isChecking = true
         downloadProgress = 0.0
         downloadStatus = ""
+        microphoneReady = false
         sherpaReady = false
         whisperReady = false
         apiReady = false
         liveSummaryReady = false
         liveSummaryStatus = "未配置"
-        providerCheckResults = LLMProviderCatalog.mergedCheckResults(from: providerAPIKeys, testedResults: [])
+        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
+            from: providerAPIKeys,
+            testedResults: [],
+            selectedModelNames: selectedProviderModelNames
+        )
         translationEnabled = false
         historyItems.removeAll { $0.isSystemMessage }
 
         Task { [weak self] in
             guard let self else { return }
             defer { self.isChecking = false }
+
+            setStatus(.checking("检查麦克风..."))
+            let micCheck = await speechEngine.checkMicrophoneConnectivity()
+            microphoneReady = micCheck.passed
+            micDeviceName = micCheck.deviceName
+            guard micCheck.passed else {
+                publishSelfCheckSummary(
+                    microphone: false,
+                    sherpa: false,
+                    whisper: false,
+                    providerResults: providerCheckResults
+                )
+                setStatus(.error(micCheck.message))
+                return
+            }
 
             setStatus(.checking("准备随附模型资源..."))
             do {
@@ -136,7 +252,12 @@ final class TranscriptionViewModel: ObservableObject {
                 sherpaReady = false
                 whisperReady = false
                 apiReady = false
-                publishSelfCheckSummary(sherpa: false, whisper: false, providerResults: providerCheckResults)
+                publishSelfCheckSummary(
+                    microphone: microphoneReady,
+                    sherpa: false,
+                    whisper: false,
+                    providerResults: providerCheckResults
+                )
                 setStatus(.error("随附资源安装失败：\(error.localizedDescription)"))
                 return
             }
@@ -157,7 +278,12 @@ final class TranscriptionViewModel: ObservableObject {
                 sherpaReady = false
                 whisperReady = false
                 apiReady = false
-                publishSelfCheckSummary(sherpa: false, whisper: false, providerResults: providerCheckResults)
+                publishSelfCheckSummary(
+                    microphone: microphoneReady,
+                    sherpa: false,
+                    whisper: false,
+                    providerResults: providerCheckResults
+                )
                 setStatus(.error("Sherpa 模型下载失败：\(error.localizedDescription)"))
                 return
             }
@@ -167,7 +293,12 @@ final class TranscriptionViewModel: ObservableObject {
                 sherpaReady = false
                 whisperReady = false
                 apiReady = false
-                publishSelfCheckSummary(sherpa: false, whisper: false, providerResults: providerCheckResults)
+                publishSelfCheckSummary(
+                    microphone: microphoneReady,
+                    sherpa: false,
+                    whisper: false,
+                    providerResults: providerCheckResults
+                )
                 setStatus(.error("Sherpa 模型缺失：请确保 \(AppResourceLocator.sherpaModelRelativePath) 已随 App 安装"))
                 return
             }
@@ -215,24 +346,36 @@ final class TranscriptionViewModel: ObservableObject {
             // 4️⃣ Groq 核心 + NVIDIA 总结测试
             setStatus(.checking("测试 Groq 与 NVIDIA 总结..."))
             let groqResult = await llmService.testConnectivity(
-                credential: LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys)
+                credential: LLMProviderCatalog.groqCoreCredential(
+                    from: providerAPIKeys,
+                    selectedModelNames: selectedProviderModelNames
+                )
             )
             let summaryResult = await nvidiaSummaryService.testConnectivity(
-                credential: LLMProviderCatalog.nvidiaSummaryCredential(from: providerAPIKeys)
+                credential: LLMProviderCatalog.nvidiaSummaryCredential(
+                    from: providerAPIKeys,
+                    selectedModelNames: selectedProviderModelNames
+                )
             )
             let mergedResults = [groqResult, summaryResult]
             providerCheckResults = mergedResults
+            recordProviderModelConnectivity(mergedResults)
             apiReady = groqResult.passed
             translationEnabled = apiReady
             liveSummaryReady = summaryResult.passed
             liveSummaryStatus = liveSummaryReady ? "等待历史内容" : summaryResult.status.displayText
             print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), NVIDIA summary: \(summaryResult.status.displayText)")
 
-            publishSelfCheckSummary(sherpa: sherpaReady, whisper: whisperReady, providerResults: mergedResults)
+            publishSelfCheckSummary(
+                microphone: microphoneReady,
+                sherpa: sherpaReady,
+                whisper: whisperReady,
+                providerResults: mergedResults
+            )
 
-            guard sherpaReady && whisperReady else {
+            guard microphoneReady && sherpaReady && whisperReady else {
                 setStatus(.error("自检未通过：Sherpa 和 Whisper large-v3 都必须本地可用"))
-                print("[TranscriptionViewModel] Self-check failed: sherpa=\(sherpaReady), whisper=\(whisperReady), api=\(apiReady)")
+                print("[TranscriptionViewModel] Self-check failed: microphone=\(microphoneReady), sherpa=\(sherpaReady), whisper=\(whisperReady), api=\(apiReady)")
                 return
             }
 
@@ -243,6 +386,188 @@ final class TranscriptionViewModel: ObservableObject {
                 : .ready("🟡 API 未连通：\(course.name) \(mode)"))
             print("[TranscriptionViewModel] Self-check ready: \(mode), translation=\(apiReady)")
         }
+    }
+
+    func noteProviderModelSelectionChanged() {
+        normalizeAllProviderModelOptions()
+        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
+            from: providerAPIKeys,
+            testedResults: [],
+            selectedModelNames: selectedProviderModelNames
+        )
+        apiReady = false
+        translationEnabled = false
+        liveSummaryReady = false
+        liveSummaryStatus = "模型已更改，请重新自检"
+        if case .ready = engineStatus {
+            setStatus(.ready("模型已更改，请重新自检"))
+        }
+        publishSelfCheckSummary(
+            microphone: microphoneReady,
+            sherpa: sherpaReady,
+            whisper: whisperReady,
+            providerResults: providerCheckResults
+        )
+    }
+
+    func providerModelOptions(for providerID: LLMProviderID) -> [LLMProviderModel] {
+        switch providerID {
+        case .groq:
+            return groqModelOptions
+        case .nvidia:
+            return nvidiaSummaryModelOptions
+        }
+    }
+
+    func providerModelDisplayText(_ model: LLMProviderModel) -> String {
+        let key = LLMProviderCatalog.connectivityKey(providerID: model.providerID, modelID: model.id)
+        guard let record = providerModelConnectivityRecords[key] else {
+            return model.displayText
+        }
+        switch record.status {
+        case .passed:
+            return "\(model.displayText) · OK"
+        case .failed:
+            return "\(model.displayText) · Failed"
+        }
+    }
+
+    func refreshProviderModelLists() {
+        guard !isRefreshingProviderModels else { return }
+        isRefreshingProviderModels = true
+        providerModelRefreshStatus = "刷新模型列表..."
+
+        Task { [weak self] in
+            guard let self else { return }
+            let groq = await refreshProviderModels(for: .groq)
+            let nvidia = await refreshProviderModels(for: .nvidia)
+
+            groqModelOptions = groq.models
+            nvidiaSummaryModelOptions = nvidia.models
+            persistModelOptions()
+            providerModelRefreshStatus = [groq.status, nvidia.status].joined(separator: "；")
+            isRefreshingProviderModels = false
+        }
+    }
+
+    private func refreshProviderModels(
+        for providerID: LLMProviderID
+    ) async -> (models: [LLMProviderModel], status: String) {
+        let providerName = LLMProviderCatalog.provider(for: providerID)?.displayName ?? providerID.rawValue
+        let key = providerAPIKeys[providerID, default: ""]
+        do {
+            let fetched = try await modelDiscoveryService.fetchFreeModels(for: providerID, apiKey: key)
+            let models = normalizedProviderModelOptions(
+                for: providerID,
+                models: fetched.isEmpty ? LLMProviderCatalog.models(for: providerID) : fetched
+            )
+            return (models, "\(providerName) 已刷新 \(models.filter { $0.freeStatus == .free }.count) 个免费模型")
+        } catch {
+            let models = normalizedProviderModelOptions(
+                for: providerID,
+                models: providerModelOptions(for: providerID).isEmpty
+                    ? LLMProviderCatalog.models(for: providerID)
+                    : providerModelOptions(for: providerID)
+            )
+            return (models, "\(providerName) 刷新失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func recordProviderModelConnectivity(_ results: [LLMProviderCheckResult]) {
+        for result in results {
+            let recordStatus: LLMProviderModelConnectivityStatus?
+            let detail: String
+            switch result.status {
+            case .passed:
+                recordStatus = .passed
+                detail = ""
+            case .failed(let reason):
+                recordStatus = .failed
+                detail = reason
+            case .notConfigured:
+                recordStatus = nil
+                detail = ""
+            }
+            guard let recordStatus else { continue }
+
+            let key = LLMProviderCatalog.connectivityKey(
+                providerID: result.provider.id,
+                modelID: result.provider.modelName
+            )
+            providerModelConnectivityRecords[key] = LLMProviderModelConnectivityRecord(
+                providerID: result.provider.id,
+                modelID: result.provider.modelName,
+                status: recordStatus,
+                detail: detail,
+                testedAt: Date()
+            )
+        }
+        persistProviderModelConnectivityRecords()
+        normalizeAllProviderModelOptions()
+    }
+
+    private func normalizeAllProviderModelOptions() {
+        groqModelOptions = normalizedProviderModelOptions(for: .groq, models: groqModelOptions)
+        nvidiaSummaryModelOptions = normalizedProviderModelOptions(for: .nvidia, models: nvidiaSummaryModelOptions)
+        persistModelOptions()
+    }
+
+    private func normalizedProviderModelOptions(
+        for providerID: LLMProviderID,
+        models: [LLMProviderModel]
+    ) -> [LLMProviderModel] {
+        var merged = models.isEmpty ? LLMProviderCatalog.models(for: providerID) : models
+        if let selectedModel = selectedProviderModelNames[providerID],
+           let preserved = LLMProviderCatalog.model(
+                for: providerID,
+                modelID: selectedModel,
+                preserveUnknown: true
+           ) {
+            merged.append(preserved)
+        }
+        for record in providerModelConnectivityRecords.values where record.providerID == providerID {
+            if let model = LLMProviderCatalog.model(
+                for: providerID,
+                modelID: record.modelID,
+                preserveUnknown: true
+            ) {
+                merged.append(model)
+            }
+        }
+        return LLMProviderCatalog.sortedModels(merged, connectivityRecords: providerModelConnectivityRecords)
+    }
+
+    private func persistModelOptions() {
+        groqModelOptionsJSON = Self.encodeModels(groqModelOptions)
+        nvidiaSummaryModelOptionsJSON = Self.encodeModels(nvidiaSummaryModelOptions)
+    }
+
+    private func persistProviderModelConnectivityRecords() {
+        let records = Array(providerModelConnectivityRecords.values)
+        guard let data = try? JSONEncoder().encode(records),
+              let json = String(data: data, encoding: .utf8) else { return }
+        providerModelConnectivityRecordsJSON = json
+    }
+
+    private static func decodeModels(from json: String) -> [LLMProviderModel]? {
+        guard let data = json.data(using: .utf8), !data.isEmpty else { return nil }
+        return try? JSONDecoder().decode([LLMProviderModel].self, from: data)
+    }
+
+    private static func encodeModels(_ models: [LLMProviderModel]) -> String {
+        guard let data = try? JSONEncoder().encode(models),
+              let json = String(data: data, encoding: .utf8) else { return "" }
+        return json
+    }
+
+    private static func decodeConnectivityRecords(
+        from json: String
+    ) -> [String: LLMProviderModelConnectivityRecord] {
+        guard let data = json.data(using: .utf8), !data.isEmpty,
+              let records = try? JSONDecoder().decode([LLMProviderModelConnectivityRecord].self, from: data) else {
+            return [:]
+        }
+        return LLMProviderCatalog.connectivityRecordsByKey(records)
     }
 
     // MARK: - 启动/停止
@@ -396,7 +721,10 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func startFinalSessionSummaryAndWriteNotes() {
-        let credential = LLMProviderCatalog.nvidiaSummaryCredential(from: providerAPIKeys)
+        let credential = LLMProviderCatalog.nvidiaSummaryCredential(
+            from: providerAPIKeys,
+            selectedModelNames: selectedProviderModelNames
+        )
         let previousSummary = liveSummaryText
         let fullContent = liveSummarySourceUnits(includeUntranslated: true)
             .map(\.text)
@@ -433,6 +761,7 @@ final class TranscriptionViewModel: ObservableObject {
                 }
 
                 self.writeFileNow()
+                self.refreshNoteRecords()
                 self.finalSummaryTask = nil
                 self.isFinalizingSession = false
                 self.canRestart = true
@@ -522,12 +851,14 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     func publishSelfCheckSummary(
+        microphone: Bool,
         sherpa: Bool,
         whisper: Bool,
         providerResults: [LLMProviderCheckResult]
     ) {
         historyItems.removeAll { $0.isSystemMessage }
         var messages = [
+            "[自检] 麦克风: \(microphone ? "通过" : "未通过")",
             "[自检] Sherpa: \(sherpa ? "通过" : "未通过")",
             "[自检] WhisperKit large-v3: \(whisper ? "通过" : "未通过")"
         ]
@@ -1103,6 +1434,65 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - 文件
 
+    nonisolated static func scanNoteRecords(in directory: URL) -> [NoteRecord] {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return urls.compactMap { url -> NoteRecord? in
+            guard let format = NoteFileFormat.fromFileExtension(url.pathExtension),
+                  let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true
+            else { return nil }
+
+            return NoteRecord(
+                url: url.standardizedFileURL,
+                fileName: url.lastPathComponent,
+                format: format,
+                modifiedAt: values.contentModificationDate ?? .distantPast,
+                fileSize: Int64(values.fileSize ?? 0),
+                previewSummary: notePreviewSummary(for: url)
+            )
+        }
+        .sorted {
+            if $0.modifiedAt != $1.modifiedAt {
+                return $0.modifiedAt > $1.modifiedAt
+            }
+            return $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
+        }
+    }
+
+    nonisolated private static func notePreviewSummary(for url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+              let text = String(data: data.prefix(2048), encoding: .utf8)
+        else { return nil }
+
+        let compact = text
+            .components(separatedBy: .newlines)
+            .compactMap { notePreviewSummaryLine(from: $0, format: NoteFileFormat.fromFileExtension(url.pathExtension)) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !compact.isEmpty else { return nil }
+        return String(compact.prefix(140))
+    }
+
+    nonisolated private static func notePreviewSummaryLine(from line: String, format: NoteFileFormat?) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard format == .markdown else { return trimmed }
+        if trimmed == "---" { return nil }
+        if trimmed.hasPrefix("#") {
+            return String(trimmed.drop { $0 == "#" })
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
     func chooseNoteDirectory() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -1115,11 +1505,13 @@ final class TranscriptionViewModel: ObservableObject {
 
         if panel.runModal() == .OK, let selected = panel.url {
             noteDirectoryPath = selected.standardizedFileURL.path
+            refreshNoteRecords()
         }
     }
 
     func resetNoteDirectoryToDesktop() {
         noteDirectoryPath = ""
+        refreshNoteRecords()
     }
 
     private func setupFilePath() {
@@ -1128,7 +1520,11 @@ final class TranscriptionViewModel: ObservableObject {
         let dateStr = df.string(from: Date())
         guard let course = currentCourse else { return }
         let directory = Self.ensureWritableNoteDirectory(noteDirectoryPath)
-        filePath = directory.appendingPathComponent("\(course.abbrev)_Session_\(dateStr).txt")
+        filePath = directory.appendingPathComponent(Self.noteFileName(course: course, dateString: dateStr, format: noteFileFormat))
+    }
+
+    nonisolated static func noteFileName(course: CourseSubject, dateString: String, format: NoteFileFormat) -> String {
+        "\(course.abbrev)_Session_\(dateString).\(format.fileExtension)"
     }
 
     nonisolated static func noteDirectory(from storedPath: String) -> URL {
@@ -1164,8 +1560,9 @@ final class TranscriptionViewModel: ObservableObject {
         let path = filePath
         let on = translationEnabled
         let summary = liveSummaryText
+        let format = noteFileFormat
         DispatchQueue.global(qos: .utility).async {
-            Self.writeFile(to: path, course: course, translationEnabled: on, items: items, finalSummary: summary)
+            Self.writeFile(to: path, course: course, translationEnabled: on, items: items, finalSummary: summary, format: format)
         }
     }
 
@@ -1175,8 +1572,9 @@ final class TranscriptionViewModel: ObservableObject {
         let on = self.translationEnabled
         let items = self.historyItems + self.dynamicItems
         let summary = self.liveSummaryText
+        let format = self.noteFileFormat
         DispatchQueue.global(qos: .utility).async {
-            Self.writeFile(to: path, course: course, translationEnabled: on, items: items, finalSummary: summary)
+            Self.writeFile(to: path, course: course, translationEnabled: on, items: items, finalSummary: summary, format: format)
         }
     }
 
@@ -1187,19 +1585,21 @@ final class TranscriptionViewModel: ObservableObject {
             course: course,
             translationEnabled: translationEnabled,
             items: historyItems + dynamicItems,
-            finalSummary: liveSummaryText
+            finalSummary: liveSummaryText,
+            format: noteFileFormat
         )
     }
 
     nonisolated private static func writeFile(to path: URL?, course: CourseSubject,
                                                translationEnabled: Bool, items: [TranscriptionItem],
-                                               finalSummary: String) {
+                                               finalSummary: String, format: NoteFileFormat) {
         guard let path else { return }
         let content = SessionNoteRenderer.render(
             course: course,
             translationEnabled: translationEnabled,
             items: items,
-            finalSummary: finalSummary
+            finalSummary: finalSummary,
+            format: format
         )
         try? content.write(to: path, atomically: true, encoding: .utf8)
     }
@@ -1208,7 +1608,10 @@ final class TranscriptionViewModel: ObservableObject {
         guard liveSummaryReady,
               !isFinalizingSession,
               !isLiveSummaryUpdating,
-              let credential = LLMProviderCatalog.nvidiaSummaryCredential(from: providerAPIKeys)
+              let credential = LLMProviderCatalog.nvidiaSummaryCredential(
+                from: providerAPIKeys,
+                selectedModelNames: selectedProviderModelNames
+              )
         else { return }
 
         let units = liveSummarySourceUnits()
@@ -1311,7 +1714,10 @@ final class TranscriptionViewModel: ObservableObject {
 
     private func groqCoreCredential() -> LLMProviderCredential? {
         guard apiReady else { return nil }
-        return LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys)
+        return LLMProviderCatalog.groqCoreCredential(
+            from: providerAPIKeys,
+            selectedModelNames: selectedProviderModelNames
+        )
     }
 
     private func groqAPIKey() -> String {

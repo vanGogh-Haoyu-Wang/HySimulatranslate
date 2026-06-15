@@ -20,6 +20,6 @@ struct HySimulatranslateApp: App {
         }
         .windowToolbarStyle(.unified)
         .windowResizability(.contentSize)
-        .defaultSize(width: 900, height: 750)
+        .defaultSize(width: 1440, height: 800)
     }
 }

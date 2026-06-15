@@ -165,25 +165,24 @@ bash script/package_dmg.sh --verify
 
 ## 使用指南
 
-### 启动配置
+### 工作台
 
-1. **API Key** — 可选配置 Groq 核心 Key（格式 `gsk_…`）和 NVIDIA 总结 Key（格式 `nvapi-…`）。不配置则无法使用 LLM 格式化和翻译。
-2. **强化专项** — 选择一个学科专项（如"默认"或自定义），用于指导 LLM 识别专业术语。
-3. 点击 **启动引擎** 开始。
+应用启动后直接进入三栏工作台。API Key 位于左下角 **设置**，强化专项从左侧 **强化专项** 进入，**新记录** 会清空当前会话并保留已有自检状态。
 
 ### 同传界面
 
 | 区域 | 功能 |
 |------|------|
-| **顶部状态栏** | 课程名、引擎状态、麦克风设备、队列大小（W=Whisper, L=LLM）、控制按钮 |
-| **左侧历史面板** | 已确认的转写+翻译结果，自动滚动 |
-| **右侧上部动态区** | 实时 Sherpa 蹦字、VAD/Whisper 候选文本、Whispering/Refining/Translating 状态 |
-| **右侧下部总结区** | NVIDIA 实时会议总结 |
+| **左侧记录区** | 扫描笔记目录 `.txt` 文件，可新建记录、进入强化专项、打开设置 |
+| **中右主框** | 共享状态标题栏、当前会话历史墙、强化专项编辑、右侧笔记总结区 |
+| **底部蹦字区** | 横贯中右主框，显示实时 Sherpa 蹦字、VAD/Whisper 候选文本、模型菜单、开始/停止按钮 |
+| **右侧总结区** | 默认显示 NVIDIA 实时会议总结；打开左侧历史笔记时由笔记预览覆盖，关闭后恢复总结 |
 
 ### 设置项
 
 - **停顿时间** (0.2s–1.5s) — 控制 sherpa-onnx 的语音分段灵敏度
 - **Whisper 精校** — 本地优先 / 云端优先 / 仅本地
+- **模型** — 在同传页设置中选择 Groq 核心模型和 NVIDIA 总结模型，支持刷新 provider 模型列表；只展示免费/兼容模型，按推荐顺序排列，上次连通失败的模型沉底
 - **笔记位置** — 默认桌面，可改为任意本地文件夹
 - **外观** — 跟随系统 / 深色 / 浅色
 
@@ -216,9 +215,9 @@ HySimulatranslate/
 │   └── HySimulatranslate/
 │       ├── HySimulatranslateApp.swift           # App 入口 + AppDelegate
 │       ├── Views/
-│       │   ├── ContentView.swift   # 根视图（启动→同传切换）
-│       │   ├── StartupView.swift   # 启动配置弹窗
-│       │   ├── TranscriptionView.swift  # 同传主界面
+│       │   ├── ContentView.swift   # 根工作台入口
+│       │   ├── StartupView.swift   # 旧启动配置视图（已不作为入口）
+│       │   ├── TranscriptionView.swift  # 三栏同传工作台
 │       │   ├── AddSubjectView.swift     # 添加强化专项
 │       │   └── GlassStyle.swift         # 毛玻璃组件
 │       ├── ViewModels/

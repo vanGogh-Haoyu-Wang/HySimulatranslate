@@ -117,7 +117,7 @@ struct StartupView: View {
                         Link("获取", destination: provider.getAPIKeyURL)
                             .font(.caption.weight(.semibold))
                     }
-                    Text(provider.modelName)
+                    Text("模型可在同传页设置中调整")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

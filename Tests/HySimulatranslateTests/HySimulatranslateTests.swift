@@ -338,6 +338,117 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(summaryCredential?.provider.id, .nvidia)
     }
 
+    func testLLMProviderModelListsContainOnlyFreeDefaults() {
+        let groqModels = LLMProviderCatalog.models(for: .groq)
+        let nvidiaModels = LLMProviderCatalog.models(for: .nvidia)
+
+        XCTAssertEqual(groqModels.first?.id, LLMProviderCatalog.defaultGroqModelName)
+        XCTAssertEqual(groqModels.first?.freeStatus, .free)
+        XCTAssertEqual(nvidiaModels.first?.id, LLMProviderCatalog.defaultNvidiaSummaryModelName)
+        XCTAssertEqual(nvidiaModels.first?.freeStatus, .free)
+        XCTAssertFalse(nvidiaModels.contains { $0.id == "nvidia/llama-3.3-nemotron-super-49b-v1.5" })
+        XCTAssertTrue(groqModels.allSatisfy { $0.freeStatus == .free })
+        XCTAssertTrue(nvidiaModels.allSatisfy { $0.freeStatus == .free })
+    }
+
+    func testModelDiscoveryParsesOpenAICompatibleModelIDs() throws {
+        let fixture = """
+        {"object":"list","data":[{"id":"llama-3.3-70b-versatile"},{"id":"whisper-large-v3"}]}
+        """.data(using: .utf8)!
+
+        XCTAssertEqual(
+            try LLMModelDiscoveryService.modelIDs(from: fixture),
+            ["llama-3.3-70b-versatile", "whisper-large-v3"]
+        )
+    }
+
+    func testFreeModelFilteringKeepsOnlySupportedChatModels() {
+        let groq = LLMProviderCatalog.freeModels(
+            for: .groq,
+            modelIDs: ["llama-3.3-70b-versatile", "whisper-large-v3", "openai/gpt-oss-120b"]
+        )
+        let nvidia = LLMProviderCatalog.freeModels(
+            for: .nvidia,
+            modelIDs: [
+                "nvidia/llama-3.3-nemotron-super-49b-v1",
+                "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+                "nvidia/parakeet-tdt-0.6b-v2"
+            ]
+        )
+
+        XCTAssertEqual(groq.map(\.id), ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
+        XCTAssertEqual(nvidia.map(\.id), ["nvidia/llama-3.3-nemotron-super-49b-v1"])
+    }
+
+    func testFailedConnectivityRecordsSinkModelsButKeepRecommendationOrder() {
+        let failed = LLMProviderModelConnectivityRecord(
+            providerID: .groq,
+            modelID: "openai/gpt-oss-120b",
+            status: .failed,
+            detail: "HTTP 404",
+            testedAt: Date(timeIntervalSince1970: 0)
+        )
+        let records = LLMProviderCatalog.connectivityRecordsByKey([failed])
+        let sorted = LLMProviderCatalog.sortedModels(
+            [
+                LLMProviderModel(providerID: .groq, id: "openai/gpt-oss-120b", freeStatus: .free, recommendationScore: 98),
+                LLMProviderModel(providerID: .groq, id: "gemma2-9b-it", freeStatus: .free, recommendationScore: 74),
+                LLMProviderModel(providerID: .groq, id: "llama-3.1-8b-instant", freeStatus: .free, recommendationScore: 88)
+            ],
+            connectivityRecords: records
+        )
+
+        XCTAssertEqual(sorted.map(\.id), ["llama-3.1-8b-instant", "gemma2-9b-it", "openai/gpt-oss-120b"])
+    }
+
+    func testSelectedProviderModelsOverrideCredentialModelNames() {
+        let keys: [LLMProviderID: String] = [
+            .groq: "gsk_test_key",
+            .nvidia: "nvapi-test-key"
+        ]
+        let selected: [LLMProviderID: String] = [
+            .groq: "llama-3.1-8b-instant",
+            .nvidia: "nvidia/llama-3.1-nemotron-70b-instruct"
+        ]
+
+        XCTAssertEqual(
+            LLMProviderCatalog.groqCoreCredential(
+                from: keys,
+                selectedModelNames: selected
+            )?.provider.modelName,
+            "llama-3.1-8b-instant"
+        )
+        XCTAssertEqual(
+            LLMProviderCatalog.nvidiaSummaryCredential(
+                from: keys,
+                selectedModelNames: selected
+            )?.provider.modelName,
+            "nvidia/llama-3.1-nemotron-70b-instruct"
+        )
+    }
+
+    @MainActor
+    func testChangingProviderModelInvalidatesPreviousConnectivityState() {
+        let vm = TranscriptionViewModel()
+        vm.providerAPIKeys = [.groq: "gsk_test_key", .nvidia: "nvapi-test-key"]
+        vm.engineStatus = .ready("ready")
+        vm.sherpaReady = true
+        vm.whisperReady = true
+        vm.apiReady = true
+        vm.translationEnabled = true
+        vm.liveSummaryReady = true
+        vm.groqCoreModelName = "llama-3.1-8b-instant"
+
+        vm.noteProviderModelSelectionChanged()
+
+        XCTAssertFalse(vm.apiReady)
+        XCTAssertFalse(vm.translationEnabled)
+        XCTAssertFalse(vm.liveSummaryReady)
+        XCTAssertTrue(vm.providerCheckResults.contains {
+            $0.provider.id == .groq && $0.provider.modelName == "llama-3.1-8b-instant"
+        })
+    }
+
     func testLiveSummaryCursorRequestsOnlyAfterEightTranslatedUnits() {
         var cursor = LiveSummaryCursor()
 
@@ -614,10 +725,36 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(content.contains("Infrastructure layer, we invested in companies like CoreWeave and Nebulon."))
     }
 
+    func testSessionNoteRendererMarkdownUsesHeadingsAndRules() {
+        let course = CourseSubject(name: "默认", abbrev: "Default", keywords: "", meetingFocus: "")
+        let content = SessionNoteRenderer.render(
+            course: course,
+            translationEnabled: true,
+            items: [
+                TranscriptionItem(
+                    english: "Markdown works with Obsidian.",
+                    chinese: "Markdown 可以和 Obsidian 配合。",
+                    status: .done,
+                    zone: .history
+                )
+            ],
+            finalSummary: "本次讨论确认支持 Markdown。",
+            format: .markdown,
+            date: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertTrue(content.contains("# HySimulatranslate Notes"))
+        XCTAssertTrue(content.contains("## 逐句同传记录"))
+        XCTAssertTrue(content.contains("---"))
+        XCTAssertTrue(content.contains("## 最终中文总结"))
+        XCTAssertTrue(content.contains("Markdown works with Obsidian.\nMarkdown 可以和 Obsidian 配合。"))
+    }
+
     @MainActor
-    func testStartGateRequiresSherpaAndWhisperButAllowsOfflineAPI() {
+    func testStartGateRequiresMicrophoneSherpaAndWhisperButAllowsOfflineAPI() {
         let vm = TranscriptionViewModel()
         vm.engineStatus = .ready("ready")
+        vm.microphoneReady = true
         vm.sherpaReady = true
         vm.whisperReady = false
         vm.apiReady = true
@@ -627,6 +764,11 @@ final class HySimulatranslateTests: XCTestCase {
         vm.whisperReady = true
         vm.apiReady = false
         vm.translationEnabled = false
+
+        vm.microphoneReady = false
+        XCTAssertFalse(vm.canStartTranscription)
+
+        vm.microphoneReady = true
 
         XCTAssertTrue(vm.canStartTranscription)
         XCTAssertEqual(vm.startTranscriptionButtonTitle, "本地同声传译")
@@ -686,6 +828,7 @@ final class HySimulatranslateTests: XCTestCase {
         let vm = TranscriptionViewModel()
 
         vm.publishSelfCheckSummary(
+            microphone: true,
             sherpa: true,
             whisper: true,
             providerResults: [
@@ -700,9 +843,10 @@ final class HySimulatranslateTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(vm.historyItems.count, 4)
+        XCTAssertEqual(vm.historyItems.count, 5)
         XCTAssertTrue(vm.historyItems.allSatisfy(\.isSystemMessage))
         XCTAssertEqual(vm.historyItems.map(\.english), [
+            "[自检] 麦克风: 通过",
             "[自检] Sherpa: 通过",
             "[自检] WhisperKit large-v3: 通过",
             "[自检] Groq / llama-3.3-70b-versatile: 通过",
@@ -831,6 +975,191 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(vm.dynamicItems.isEmpty)
         XCTAssertEqual(vm.draftText, "")
         XCTAssertFalse(vm.canRestart)
+    }
+
+    func testNoteRecordScannerReturnsSupportedNoteFilesInModificationOrder() throws {
+        let directory = try makeTemporaryDirectory()
+        let older = directory.appendingPathComponent("older.txt")
+        let newer = directory.appendingPathComponent("newer.TXT")
+        let newest = directory.appendingPathComponent("newest.md")
+        let markdown = directory.appendingPathComponent("reference.markdown")
+        let ignored = directory.appendingPathComponent("ignored.json")
+        let nested = directory.appendingPathComponent("Nested", isDirectory: true)
+
+        try Data("Older note body".utf8).write(to: older)
+        try Data("Newer note body".utf8).write(to: newer)
+        try Data("# Newest note\n---\nMarkdown body".utf8).write(to: newest)
+        try Data("# Reference note".utf8).write(to: markdown)
+        try Data("Not a note".utf8).write(to: ignored)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("Nested note".utf8).write(to: nested.appendingPathComponent("nested.txt"))
+
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 100)],
+            ofItemAtPath: older.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 200)],
+            ofItemAtPath: newer.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 300)],
+            ofItemAtPath: newest.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 150)],
+            ofItemAtPath: markdown.path
+        )
+
+        let records = TranscriptionViewModel.scanNoteRecords(in: directory)
+
+        XCTAssertEqual(records.map(\.fileName), ["newest.md", "newer.TXT", "reference.markdown", "older.txt"])
+        XCTAssertEqual(records.map(\.format), [.markdown, .text, .markdown, .text])
+        XCTAssertEqual(records.first?.previewSummary, "Newest note Markdown body")
+    }
+
+    @MainActor
+    func testRefreshNoteRecordsUsesConfiguredNoteDirectory() throws {
+        let directory = try makeTemporaryDirectory()
+        try Data("Session note".utf8).write(to: directory.appendingPathComponent("session.txt"))
+        try Data("# Markdown note".utf8).write(to: directory.appendingPathComponent("session.md"))
+        try Data("Ignore".utf8).write(to: directory.appendingPathComponent("session.json"))
+
+        let vm = TranscriptionViewModel()
+        vm.noteDirectoryPath = directory.path
+        vm.refreshNoteRecords()
+
+        XCTAssertEqual(Set(vm.noteRecords.map(\.fileName)), Set(["session.txt", "session.md"]))
+    }
+
+    @MainActor
+    func testNoteFileFormatDefaultsToMarkdownAndBuildsExpectedExtensions() {
+        UserDefaults.standard.removeObject(forKey: "noteFileFormat")
+        let vm = TranscriptionViewModel()
+        let course = CourseSubject(name: "默认", abbrev: "Default", keywords: "", meetingFocus: "")
+
+        XCTAssertEqual(vm.noteFileFormat, .markdown)
+        XCTAssertEqual(
+            TranscriptionViewModel.noteFileName(course: course, dateString: "2026-06-15_02-45", format: .markdown),
+            "Default_Session_2026-06-15_02-45.md"
+        )
+        XCTAssertEqual(
+            TranscriptionViewModel.noteFileName(course: course, dateString: "2026-06-15_02-45", format: .text),
+            "Default_Session_2026-06-15_02-45.txt"
+        )
+    }
+
+    @MainActor
+    func testStartNewRecordClearsDisplayButKeepsReadinessAndProviderResults() {
+        let vm = TranscriptionViewModel()
+        let result = LLMProviderCheckResult(
+            provider: LLMProviderCatalog.groqCoreProvider!,
+            status: .passed
+        )
+        vm.engineStatus = .ready("ready")
+        vm.microphoneReady = true
+        vm.sherpaReady = true
+        vm.whisperReady = true
+        vm.apiReady = true
+        vm.translationEnabled = true
+        vm.liveSummaryReady = true
+        vm.providerCheckResults = [result]
+        vm.historyItems = [TranscriptionItem(english: "History item.", status: .done, zone: .history)]
+        vm.dynamicItems = [TranscriptionItem(english: "Dynamic item.", status: .done, zone: .dynamic)]
+        vm.draftText = "Current draft"
+        vm.liveSummaryText = "Summary"
+        vm.canRestart = true
+
+        vm.startNewRecordWithoutSelfCheck()
+
+        XCTAssertTrue(vm.historyItems.isEmpty)
+        XCTAssertTrue(vm.dynamicItems.isEmpty)
+        XCTAssertEqual(vm.draftText, "")
+        XCTAssertEqual(vm.liveSummaryText, "")
+        XCTAssertTrue(vm.microphoneReady)
+        XCTAssertTrue(vm.sherpaReady)
+        XCTAssertTrue(vm.whisperReady)
+        XCTAssertTrue(vm.apiReady)
+        XCTAssertTrue(vm.liveSummaryReady)
+        XCTAssertEqual(vm.providerCheckResults, [result])
+        XCTAssertTrue(vm.canStartTranscription)
+    }
+
+    @MainActor
+    func testSelectCourseUpdatesCurrentCourseButDoesNotChangeWhileRecording() {
+        let vm = TranscriptionViewModel()
+        let first = CourseSubject(name: "First", abbrev: "F", keywords: "", meetingFocus: "")
+        let second = CourseSubject(name: "Second", abbrev: "S", keywords: "", meetingFocus: "")
+
+        vm.selectCourse(first)
+        XCTAssertEqual(vm.currentCourse, first)
+
+        vm.isRecording = true
+        vm.selectCourse(second)
+        XCTAssertEqual(vm.currentCourse, first)
+    }
+
+    @MainActor
+    func testProviderCheckStripHidesAfterTranscriptionStartsOrHistoryArrives() {
+        let results = [
+            LLMProviderCheckResult(provider: LLMProviderCatalog.groqCoreProvider!, status: .passed),
+            LLMProviderCheckResult(provider: LLMProviderCatalog.nvidiaSummaryProvider!, status: .passed)
+        ]
+        let systemHistory = [
+            TranscriptionItem(english: "[自检] Sherpa: 通过", status: .done, zone: .history, isSystemMessage: true)
+        ]
+        let formalHistory = [
+            TranscriptionItem(english: "Hello.", status: .done, zone: .history, isSystemMessage: false)
+        ]
+
+        XCTAssertTrue(TranscriptionView.shouldShowProviderCheckStrip(
+            isRecording: false,
+            isFinalizingSession: false,
+            canRestart: false,
+            historyItems: systemHistory,
+            providerCheckResults: results
+        ))
+        XCTAssertFalse(TranscriptionView.shouldShowProviderCheckStrip(
+            isRecording: true,
+            isFinalizingSession: false,
+            canRestart: false,
+            historyItems: systemHistory,
+            providerCheckResults: results
+        ))
+        XCTAssertFalse(TranscriptionView.shouldShowProviderCheckStrip(
+            isRecording: false,
+            isFinalizingSession: true,
+            canRestart: false,
+            historyItems: systemHistory,
+            providerCheckResults: results
+        ))
+        XCTAssertFalse(TranscriptionView.shouldShowProviderCheckStrip(
+            isRecording: false,
+            isFinalizingSession: false,
+            canRestart: true,
+            historyItems: systemHistory,
+            providerCheckResults: results
+        ))
+        XCTAssertFalse(TranscriptionView.shouldShowProviderCheckStrip(
+            isRecording: false,
+            isFinalizingSession: false,
+            canRestart: false,
+            historyItems: formalHistory,
+            providerCheckResults: results
+        ))
+    }
+
+    @MainActor
+    func testUpdateProviderAPIKeysUpdatesViewModelProviderKeys() {
+        let vm = TranscriptionViewModel()
+        vm.updateProviderAPIKeys([
+            .groq: "gsk_test_key",
+            .nvidia: "nvapi-test-key"
+        ])
+
+        XCTAssertEqual(vm.providerAPIKeys[.groq], "gsk_test_key")
+        XCTAssertEqual(vm.providerAPIKeys[.nvidia], "nvapi-test-key")
+        XCTAssertEqual(vm.providerCheckResults.count, 2)
     }
 
     @MainActor

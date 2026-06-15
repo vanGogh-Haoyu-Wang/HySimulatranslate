@@ -1,5 +1,52 @@
 import Foundation
 
+// MARK: - 笔记历史
+struct NoteRecord: Identifiable, Equatable {
+    var id: String { url.standardizedFileURL.path }
+    let url: URL
+    let fileName: String
+    let format: NoteFileFormat
+    let modifiedAt: Date
+    let fileSize: Int64
+    let previewSummary: String?
+}
+
+enum NoteFileFormat: String, CaseIterable, Identifiable {
+    case markdown
+    case text
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .markdown: "Markdown (.md)"
+        case .text: "Text (.txt)"
+        }
+    }
+
+    var fileExtension: String {
+        switch self {
+        case .markdown: "md"
+        case .text: "txt"
+        }
+    }
+
+    static func fromFileExtension(_ fileExtension: String) -> NoteFileFormat? {
+        switch fileExtension.lowercased() {
+        case "md", "markdown": .markdown
+        case "txt": .text
+        default: nil
+        }
+    }
+}
+
+enum WorkspaceMode: Equatable {
+    case transcription
+    case courseSelection
+    case notePreview(NoteRecord)
+    case settings
+}
+
 // MARK: - 同传条目
 struct TranscriptionItem: Identifiable, Equatable {
     let id: UUID

@@ -11,50 +11,26 @@ struct ContentView: View {
 
     @State private var providerAPIKeys: [LLMProviderID: String] = [:]
     @State private var selectedCourseIndex: Int = 0
-    @State private var isAppReady = false
+    @State private var didInitializeWorkspace = false
 
     var body: some View {
-        Group {
-            if !isAppReady {
-                StartupView(
-                    courseDB: courseDB,
-                    providerAPIKeys: $providerAPIKeys,
-                    selectedCourseIndex: $selectedCourseIndex,
-                    onLaunch: launchEngine
-                )
-            } else {
-                TranscriptionView(
-                    vm: vm,
-                    courseDB: courseDB,
-                    courseIndex: selectedCourseIndex,
-                    onBack: exitEngine
-                )
-            }
-        }
+        TranscriptionView(
+            vm: vm,
+            courseDB: courseDB,
+            providerAPIKeys: $providerAPIKeys,
+            selectedCourseIndex: $selectedCourseIndex
+        )
         .background(GlassWindowConfigurator())
         .onAppear {
-            providerAPIKeys = KeychainManager.shared.loadProviderKeys()
             applyAppearance(appearanceMode)
+            initializeWorkspaceIfNeeded()
         }
         .onChange(of: appearanceMode) { _, newValue in
             applyAppearance(newValue)
         }
-    }
-
-    private func launchEngine() {
-        guard selectedCourseIndex < courseDB.allSubjects.count else { return }
-
-        KeychainManager.shared.saveProviderKeys(providerAPIKeys)
-        vm.providerAPIKeys = providerAPIKeys
-        vm.currentCourse = courseDB.allSubjects[selectedCourseIndex]
-        vm.translationEnabled = false
-        isAppReady = true
-    }
-
-    private func exitEngine() {
-        vm.stopTranscription()
-        vm.clearDisplayHistory()
-        isAppReady = false
+        .onChange(of: courseDB.allSubjects.count) { _, _ in
+            normalizeCourseSelection()
+        }
     }
 
     private func applyAppearance(_ mode: String) {
@@ -64,5 +40,25 @@ struct ContentView: View {
         } else {
             NSApp.appearance = nil
         }
+    }
+
+    private func initializeWorkspaceIfNeeded() {
+        guard !didInitializeWorkspace else { return }
+        didInitializeWorkspace = true
+
+        providerAPIKeys = KeychainManager.shared.loadProviderKeys()
+        vm.updateProviderAPIKeys(providerAPIKeys)
+        normalizeCourseSelection()
+        vm.refreshNoteRecords()
+
+        if vm.currentCourse != nil, case .idle = vm.engineStatus {
+            vm.runSystemCheck()
+        }
+    }
+
+    private func normalizeCourseSelection() {
+        guard !courseDB.allSubjects.isEmpty else { return }
+        selectedCourseIndex = min(selectedCourseIndex, courseDB.allSubjects.count - 1)
+        vm.selectCourse(courseDB.allSubjects[selectedCourseIndex])
     }
 }

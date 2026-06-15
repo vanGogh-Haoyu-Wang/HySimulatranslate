@@ -6,6 +6,12 @@ import CoreAudio
 // 完全替代原 SFSpeechRecognizer 方案
 
 final class SpeechEngine: NSObject, @unchecked Sendable {
+    struct MicrophoneCheckResult: Equatable {
+        let passed: Bool
+        let deviceName: String
+        let message: String
+    }
+
     var currentVolume: Float {
         volumeLock.lock()
         defer { volumeLock.unlock() }
@@ -40,6 +46,33 @@ final class SpeechEngine: NSObject, @unchecked Sendable {
         default:
             return false
         }
+    }
+
+    func checkMicrophoneConnectivity() async -> MicrophoneCheckResult {
+        guard await Self.requestMicrophoneAccess() else {
+            micDeviceName = ""
+            return MicrophoneCheckResult(
+                passed: false,
+                deviceName: "",
+                message: "麦克风权限未授权。请在系统设置中允许 HySimulatranslate 使用麦克风。"
+            )
+        }
+
+        guard let defaultID = defaultInputDeviceID() else {
+            micDeviceName = ""
+            return MicrophoneCheckResult(passed: false, deviceName: "", message: "未找到默认输入设备")
+        }
+
+        let inputNode = engine.inputNode
+        let nativeFormat = inputNode.outputFormat(forBus: 0)
+        guard nativeFormat.sampleRate > 0, nativeFormat.channelCount > 0 else {
+            micDeviceName = ""
+            return MicrophoneCheckResult(passed: false, deviceName: "", message: "麦克风输入格式不可用")
+        }
+
+        let name = deviceNameForID(defaultID) ?? "默认麦克风"
+        micDeviceName = name
+        return MicrophoneCheckResult(passed: true, deviceName: name, message: name)
     }
 
     // MARK: - 启动
@@ -144,7 +177,10 @@ final class SpeechEngine: NSObject, @unchecked Sendable {
                                            mElement: kAudioObjectPropertyElementMain)
         var id = AudioDeviceID()
         var s = UInt32(MemoryLayout<AudioDeviceID>.size)
-        return AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &s, &id) == noErr ? id : nil
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &s, &id) == noErr,
+              id != AudioDeviceID(kAudioObjectUnknown)
+        else { return nil }
+        return id
     }
 
     private func deviceNameForID(_ id: AudioDeviceID) -> String? {
