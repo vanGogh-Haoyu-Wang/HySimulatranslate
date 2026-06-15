@@ -8,6 +8,7 @@ struct TranscriptionView: View {
     @Binding var providerAPIKeys: [LLMProviderID: String]
     @Binding var selectedCourseIndex: Int
 
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
 
     @State private var workspaceMode: WorkspaceMode = .transcription
@@ -28,13 +29,56 @@ struct TranscriptionView: View {
     private let titlebarControlsLeadingPadding: CGFloat = 92
     private let titlebarControlsTopPadding: CGFloat = 10
     private let titlebarControlSize: CGFloat = 22
+    private let centerWallTextSize: CGFloat = 13
     private let unBlue = Color(red: 0.255, green: 0.561, blue: 0.871)
     private let draftBlue = Color(red: 0.0, green: 0.478, blue: 1.0)
+
+    private var isDarkSurface: Bool {
+        colorScheme == .dark
+    }
+
+    private var workSurfaceColor: Color {
+        isDarkSurface ? .black : .white
+    }
+
+    private var workSurfaceBorderColor: Color {
+        isDarkSurface ? .white.opacity(0.14) : .black.opacity(0.12)
+    }
+
+    private var workSurfaceShadowColor: Color {
+        .black.opacity(isDarkSurface ? 0.26 : 0.14)
+    }
+
+    private var dynamicInputBorderColor: Color {
+        isDarkSurface ? .white.opacity(0.13) : .black.opacity(0.10)
+    }
+
+    private var dynamicInputGlassTintColor: Color {
+        isDarkSurface ? .white.opacity(0.06) : .white.opacity(0.34)
+    }
+
+    private var deepGlassOverlay: Color {
+        isDarkSurface
+            ? .black.opacity(0.34)
+            : Color(red: 0.43, green: 0.69, blue: 0.90).opacity(0.38)
+    }
+
+    private var sidebarRowBackgroundColor: Color {
+        isDarkSurface ? .white.opacity(0.07) : .black.opacity(0.08)
+    }
+
+    private var sidebarSelectedRowBackgroundColor: Color {
+        Color.accentColor.opacity(isDarkSurface ? 0.24 : 0.20)
+    }
 
     private var titlebarStatusLeadingPadding: CGFloat {
         isLeftSidebarCollapsed
             ? collapsedTitlebarLeadingPadding
             : titlebarLeadingPadding
+    }
+
+    private func centerWallFont(weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
+        .system(size: centerWallTextSize, weight: weight, design: design)
     }
 
     private var courseName: String {
@@ -96,6 +140,9 @@ struct TranscriptionView: View {
         ZStack {
             Rectangle()
                 .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+            Rectangle()
+                .fill(deepGlassOverlay)
                 .ignoresSafeArea()
 
             GeometryReader { proxy in
@@ -255,7 +302,7 @@ struct TranscriptionView: View {
                     Text("设置")
                     Spacer()
                 }
-                .font(.callout.weight(.medium))
+                .font(.system(size: 13, weight: .medium))
                 .padding(.vertical, 8)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
@@ -280,7 +327,7 @@ struct TranscriptionView: View {
                 Text(title)
                 Spacer()
             }
-            .font(.callout.weight(.medium))
+            .font(.system(size: 13, weight: .medium))
             .padding(.vertical, 8)
             .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -325,7 +372,7 @@ struct TranscriptionView: View {
             .padding(.horizontal, 6)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(vm.selectedNoteRecord?.id == record.id ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.05))
+                    .fill(vm.selectedNoteRecord?.id == record.id ? sidebarSelectedRowBackgroundColor : sidebarRowBackgroundColor)
             )
             .contentShape(Rectangle())
         }
@@ -348,7 +395,15 @@ struct TranscriptionView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .glassPanel(cornerRadius: 16, material: .regularMaterial)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(workSurfaceColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(workSurfaceBorderColor, lineWidth: 1)
+        )
+        .shadow(color: workSurfaceShadowColor, radius: 16, y: 6)
         .ignoresSafeArea(.container, edges: [.top, .trailing])
     }
 
@@ -359,7 +414,7 @@ struct TranscriptionView: View {
 
             HStack(spacing: 12) {
                 Text(courseName)
-                    .font(.callout.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                     .lineLimit(1)
 
                 statusBadge
@@ -375,7 +430,7 @@ struct TranscriptionView: View {
                     Text("W\(vm.whisperQueueSize) / L\(vm.llmQueueSize)")
                         .monospacedDigit()
                 }
-                .font(.caption)
+                .font(centerWallFont())
                 .foregroundStyle(.secondary)
 
                 Button {
@@ -384,9 +439,12 @@ struct TranscriptionView: View {
                     }
                 } label: {
                     Image(systemName: isSummaryPaneCollapsed ? "sidebar.right" : "sidebar.trailing")
-                        .font(.caption)
+                        .font(.system(size: 13, weight: .regular))
+                        .frame(width: titlebarControlSize, height: titlebarControlSize)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary.opacity(0.85))
                 .help(isSummaryPaneCollapsed ? "展开笔记总结区" : "收起笔记总结区")
 
                 if activeNotePreview != nil {
@@ -396,9 +454,12 @@ struct TranscriptionView: View {
                         }
                     } label: {
                         Image(systemName: "xmark.circle")
-                            .font(.caption)
+                            .font(.system(size: 13, weight: .regular))
+                            .frame(width: titlebarControlSize, height: titlebarControlSize)
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary.opacity(0.85))
                     .help("关闭历史笔记预览")
                 }
             }
@@ -408,7 +469,7 @@ struct TranscriptionView: View {
         .frame(maxWidth: .infinity, minHeight: 42, maxHeight: 42, alignment: .leading)
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(.white.opacity(0.10))
+                .fill(workSurfaceBorderColor)
                 .frame(height: 1)
         }
     }
@@ -448,16 +509,16 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("当前同传")
-                    .font(.title3.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                 providerModelBadge(prefix: "Groq", modelName: vm.groqCoreModelName)
                 Spacer()
                 Text(statusLabel)
-                    .font(.caption.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                     .foregroundStyle(statusColor)
             }
 
             Text(vm.statusMessage)
-                .font(.callout)
+                .font(centerWallFont())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -469,7 +530,7 @@ struct TranscriptionView: View {
                     let downloadDetail = vm.downloadStatus.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !downloadDetail.isEmpty, downloadDetail != vm.statusMessage {
                         Text(downloadDetail)
-                            .font(.caption2)
+                            .font(centerWallFont())
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -490,7 +551,7 @@ struct TranscriptionView: View {
 
     private var providerCheckStrip: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(vm.providerCheckResults, id: \.provider.id) { result in
+            ForEach(visibleProviderCheckResults, id: \.provider.id) { result in
                 HStack(spacing: 8) {
                     Circle()
                         .frame(width: 7, height: 7)
@@ -501,8 +562,17 @@ struct TranscriptionView: View {
                     Text(result.status.displayText)
                         .foregroundStyle(providerStatusColor(for: result.provider.id))
                 }
-                .font(.caption)
+                .font(centerWallFont())
             }
+        }
+    }
+
+    private var visibleProviderCheckResults: [LLMProviderCheckResult] {
+        vm.providerCheckResults.filter { result in
+            if result.provider.id == .agnes, result.status == .notConfigured {
+                return false
+            }
+            return true
         }
     }
 
@@ -510,7 +580,7 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Text("强化专项")
-                    .font(.title3.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
 
                 Spacer()
 
@@ -518,6 +588,7 @@ struct TranscriptionView: View {
                     showingAddSubject = true
                 } label: {
                     Label("添加", systemImage: "plus")
+                        .font(centerWallFont(weight: .semibold))
                 }
                 .buttonStyle(.bordered)
 
@@ -526,6 +597,7 @@ struct TranscriptionView: View {
                         restoreDefaultCourses()
                     } label: {
                         Label("Restore", systemImage: "arrow.counterclockwise")
+                            .font(centerWallFont(weight: .semibold))
                     }
                     .buttonStyle(.bordered)
                 }
@@ -535,7 +607,7 @@ struct TranscriptionView: View {
                 LazyVStack(spacing: 8) {
                     if courseDB.allSubjects.isEmpty {
                         Text("暂无强化专项")
-                            .font(.callout)
+                            .font(centerWallFont())
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 24)
@@ -559,7 +631,7 @@ struct TranscriptionView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
                     Text(course.name)
-                        .font(.callout.weight(selectedCourseIndex == index ? .semibold : .regular))
+                        .font(centerWallFont(weight: selectedCourseIndex == index ? .semibold : .regular))
                         .lineLimit(1)
                     Spacer()
                     if selectedCourseIndex == index {
@@ -568,7 +640,7 @@ struct TranscriptionView: View {
                     }
                 }
                 Text(course.meetingFocus)
-                    .font(.caption)
+                    .font(centerWallFont())
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
@@ -612,7 +684,7 @@ struct TranscriptionView: View {
 
                     if visibleItems.isEmpty {
                         Text("暂无历史内容")
-                            .font(.callout)
+                            .font(centerWallFont())
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 18)
@@ -638,7 +710,7 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("笔记总结区")
-                    .font(.caption.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                     .foregroundStyle(.secondary)
                 providerModelBadge(prefix: "NVIDIA", modelName: vm.nvidiaSummaryModelName)
                 Spacer()
@@ -654,7 +726,7 @@ struct TranscriptionView: View {
                     .frame(width: 6, height: 6)
                     .foregroundStyle(vm.liveSummaryReady ? .green : .secondary)
                 Text(vm.liveSummaryStatus)
-                    .font(.caption.weight(.medium))
+                    .font(centerWallFont(weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -663,7 +735,7 @@ struct TranscriptionView: View {
 
             ScrollView {
                 Text(vm.liveSummaryText.isEmpty ? vm.liveSummaryStatus : vm.liveSummaryText)
-                    .font(.system(size: 13))
+                    .font(centerWallFont())
                     .foregroundStyle(vm.liveSummaryText.isEmpty ? .secondary : .primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -678,13 +750,13 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("历史笔记")
-                    .font(.caption.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                     .foregroundStyle(.secondary)
                 Text(activeNotePreview?.fileName ?? vm.selectedNoteRecord?.fileName ?? "笔记")
-                    .font(.headline)
+                    .font(centerWallFont(weight: .semibold))
                     .lineLimit(2)
                 Text(vm.notePreviewStatus)
-                    .font(.caption)
+                    .font(centerWallFont())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -710,7 +782,7 @@ struct TranscriptionView: View {
                 .foregroundStyle(.primary)
         } else {
             Text(text)
-                .font(.system(size: 13, design: .monospaced))
+                .font(centerWallFont(design: .monospaced))
                 .foregroundStyle(isEmpty ? .secondary : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
@@ -733,12 +805,12 @@ struct TranscriptionView: View {
                             HStack(alignment: .firstTextBaseline, spacing: 4) {
                                 Text("🇬🇧")
                                 Text(vm.draftText)
-                                    .font(.title3.weight(.heavy))
+                                    .font(centerWallFont(weight: .heavy))
                                     .foregroundStyle(draftBlue)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .fixedSize(horizontal: false, vertical: true)
                                 Text("[Listening...]")
-                                    .font(.caption)
+                                    .font(centerWallFont())
                                     .foregroundColor(.secondary)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -746,7 +818,7 @@ struct TranscriptionView: View {
 
                         if vm.dynamicItems.filter({ $0.isVisible }).isEmpty && vm.draftText.isEmpty {
                             Text("Waiting for speech...")
-                                .font(.title3)
+                                .font(centerWallFont())
                                 .foregroundColor(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.top, 8)
@@ -769,7 +841,7 @@ struct TranscriptionView: View {
 
             HStack(spacing: 10) {
                 Text("HySimulatranslate powered by Haoyu Wang")
-                    .font(.caption2.weight(.medium))
+                    .font(centerWallFont(weight: .medium))
                     .foregroundStyle(.secondary.opacity(0.72))
                     .lineLimit(1)
                 Spacer()
@@ -782,13 +854,17 @@ struct TranscriptionView: View {
         .frame(height: 154)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.thinMaterial)
+                .fill(.regularMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(dynamicInputGlassTintColor)
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.white.opacity(0.14), lineWidth: 1)
+                .stroke(dynamicInputBorderColor, lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.08), radius: 14, y: 6)
+        .shadow(color: .black.opacity(isDarkSurface ? 0.22 : 0.10), radius: 12, y: 5)
         .clipped()
     }
 
@@ -802,58 +878,74 @@ struct TranscriptionView: View {
                             .scaleEffect(0.75)
                         Text("整理笔记中...")
                     }
+                    .font(centerWallFont(weight: .semibold))
                     .frame(minWidth: 138, minHeight: 30)
                 }
                 .buttonStyle(.bordered)
                 .disabled(true)
             } else if vm.canRestart {
-                Button {
+                dynamicControlButton(
+                    systemImage: "arrow.clockwise",
+                    tint: unBlue,
+                    help: "再次开始"
+                ) {
                     vm.prepareRestart()
                     vm.refreshNoteRecords()
-                } label: {
-                    Label("再次开始", systemImage: "arrow.clockwise")
-                        .frame(minWidth: 128, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(unBlue)
             } else if vm.isRecording {
-                Button {
+                dynamicControlButton(
+                    systemImage: "stop.fill",
+                    tint: .red,
+                    help: "结束录制"
+                ) {
                     vm.stopTranscription()
-                } label: {
-                    Label("结束录制", systemImage: "stop.fill")
-                        .frame(minWidth: 128, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
             } else if case .ready = vm.engineStatus, vm.canStartTranscription {
-                Button {
+                dynamicControlButton(
+                    systemImage: "play.fill",
+                    tint: vm.translationEnabled ? unBlue : .orange,
+                    help: vm.startTranscriptionButtonTitle
+                ) {
                     vm.startTranscription()
-                } label: {
-                    Label(vm.startTranscriptionButtonTitle, systemImage: "play.fill")
-                        .frame(minWidth: 148, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(vm.translationEnabled ? unBlue : .orange)
             } else if case .checking = vm.engineStatus {
                 HStack(spacing: 8) {
                     ProgressView().scaleEffect(0.75)
                     Text("自检中")
                         .foregroundColor(.orange)
                 }
-                .font(.callout)
+                .font(centerWallFont(weight: .semibold))
                 .frame(minWidth: 108, minHeight: 30)
             } else if case .error = vm.engineStatus {
-                Button {
+                dynamicControlButton(
+                    systemImage: "arrow.clockwise",
+                    tint: .orange,
+                    help: "重新自检"
+                ) {
                     vm.runSystemCheck()
-                } label: {
-                    Label("重新自检", systemImage: "arrow.clockwise")
-                        .frame(minWidth: 128, minHeight: 30)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
             }
         }
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func dynamicControlButton(
+        systemImage: String,
+        tint: Color,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(tint))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(Text(help))
     }
 
     // MARK: - 设置
@@ -862,7 +954,7 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Text("设置")
-                    .font(.title3.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
 
                 Spacer()
             }
@@ -893,17 +985,20 @@ struct TranscriptionView: View {
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("API Key", systemImage: "key.fill")
-                .font(.subheadline.weight(.semibold))
+                .font(centerWallFont(weight: .semibold))
             if let groq = LLMProviderCatalog.groqCoreProvider {
                 providerKeyRow(groq, title: "Groq 核心")
             }
             if let nvidia = LLMProviderCatalog.nvidiaSummaryProvider {
                 providerKeyRow(nvidia, title: "NVIDIA 总结")
             }
+            if let agnes = LLMProviderCatalog.agnesOrganizerProvider {
+                providerKeyRow(agnes, title: "Agnes 整理", showsStatus: true)
+            }
         }
     }
 
-    private func providerKeyRow(_ provider: LLMProvider, title: String) -> some View {
+    private func providerKeyRow(_ provider: LLMProvider, title: String, showsStatus: Bool = false) -> some View {
         let key = providerAPIKeys[provider.id, default: ""]
         let hasKey = provider.acceptsKey(key)
         let hasInvalidKey = !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasKey
@@ -913,19 +1008,27 @@ struct TranscriptionView: View {
                 Image(systemName: hasKey ? "checkmark.circle.fill" : "key")
                     .foregroundStyle(hasKey ? .green : .secondary)
                 Text(title)
-                    .font(.caption.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                 Spacer()
                 Link("获取", destination: provider.getAPIKeyURL)
-                    .font(.caption.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
             }
 
             SecureField(provider.keyPlaceholder, text: apiKeyBinding(for: provider.id))
+                .font(centerWallFont())
                 .textFieldStyle(.roundedBorder)
 
             if hasInvalidKey {
                 Label("Key 应以 '\(provider.requiredKeyPrefix ?? "")' 开头", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2)
+                    .font(centerWallFont())
                     .foregroundStyle(.red)
+            }
+
+            if showsStatus {
+                Text(providerStatusText(for: provider.id))
+                    .font(centerWallFont())
+                    .foregroundStyle(providerStatusColor(for: provider.id))
+                    .lineLimit(1)
             }
         }
     }
@@ -946,9 +1049,10 @@ struct TranscriptionView: View {
     private var noteDirectorySection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("笔记位置", systemImage: "folder")
-                .font(.subheadline.weight(.semibold))
+                .font(centerWallFont(weight: .semibold))
             HStack(spacing: 8) {
                 TextField("笔记保存路径", text: noteDirectoryBinding)
+                    .font(centerWallFont())
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1)
                 Button {
@@ -971,6 +1075,7 @@ struct TranscriptionView: View {
                     Text(format.title).tag(format.rawValue)
                 }
             }
+            .font(centerWallFont())
             .labelsHidden()
             .pickerStyle(.segmented)
             .controlSize(.small)
@@ -984,7 +1089,7 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label("模型", systemImage: "cpu")
-                    .font(.subheadline.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                 Spacer()
                 if vm.isRefreshingProviderModels {
                     ProgressView()
@@ -998,6 +1103,7 @@ struct TranscriptionView: View {
                     vm.refreshProviderModelLists()
                 } label: {
                     Label("刷新列表", systemImage: "arrow.triangle.2.circlepath")
+                        .font(centerWallFont(weight: .semibold))
                 }
                 .buttonStyle(.borderless)
                 .disabled(providerModelControlsDisabled)
@@ -1006,6 +1112,7 @@ struct TranscriptionView: View {
                     vm.runSystemCheck()
                 } label: {
                     Label("重新自检", systemImage: "arrow.clockwise")
+                        .font(centerWallFont(weight: .semibold))
                 }
                 .buttonStyle(.borderless)
                 .disabled(providerModelControlsDisabled)
@@ -1026,7 +1133,7 @@ struct TranscriptionView: View {
 
             if !vm.providerModelRefreshStatus.isEmpty {
                 Text(vm.providerModelRefreshStatus)
-                    .font(.caption2)
+                    .font(centerWallFont())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1036,12 +1143,13 @@ struct TranscriptionView: View {
     private var whisperSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Whisper 精校", systemImage: "waveform.and.magnifyingglass")
-                .font(.subheadline.weight(.semibold))
+                .font(centerWallFont(weight: .semibold))
             Picker("Whisper 精校", selection: $vm.whisperRefinementModeRaw) {
                 ForEach(WhisperRefinementMode.allCases) { mode in
                     Text(mode.title).tag(mode.rawValue)
                 }
             }
+            .font(centerWallFont())
             .labelsHidden()
             .pickerStyle(.segmented)
             .disabled(vm.isRecording)
@@ -1052,9 +1160,10 @@ struct TranscriptionView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("停顿时间", systemImage: "timer")
-                    .font(.subheadline.weight(.semibold))
+                    .font(centerWallFont(weight: .semibold))
                 Spacer()
                 Text(String(format: "%.1fs", vm.pauseVal))
+                    .font(centerWallFont(design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -1068,12 +1177,13 @@ struct TranscriptionView: View {
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("外观", systemImage: "circle.lefthalf.filled")
-                .font(.subheadline.weight(.semibold))
+                .font(centerWallFont(weight: .semibold))
             Picker("外观", selection: $appearanceMode) {
                 ForEach(AppearanceMode.allCases) { mode in
                     Text(mode.title).tag(mode.rawValue)
                 }
             }
+            .font(centerWallFont())
             .labelsHidden()
             .pickerStyle(.segmented)
         }
@@ -1087,7 +1197,7 @@ struct TranscriptionView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.caption.weight(.semibold))
+                .font(centerWallFont(weight: .semibold))
             Picker(title, selection: selection) {
                 ForEach(models) { model in
                     Text(vm.providerModelDisplayText(model)).tag(model.id)
@@ -1101,7 +1211,7 @@ struct TranscriptionView: View {
             }
 
             Text(providerStatusText(for: providerID))
-                .font(.caption2)
+                .font(centerWallFont())
                 .foregroundStyle(providerStatusColor(for: providerID))
                 .lineLimit(1)
         }
@@ -1132,7 +1242,7 @@ struct TranscriptionView: View {
 
     private func providerModelBadge(prefix: String, modelName: String) -> some View {
         Text("\(prefix) · \(modelName)")
-            .font(.caption2.weight(.medium))
+            .font(centerWallFont(weight: .medium))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.middle)
@@ -1143,7 +1253,7 @@ struct TranscriptionView: View {
         HStack(spacing: 4) {
             Circle().frame(width: 6, height: 6).foregroundColor(statusColor)
             Text(statusLabel)
-                .font(.caption.weight(.semibold))
+                .font(centerWallFont(weight: .semibold))
         }
     }
 
@@ -1174,7 +1284,7 @@ struct TranscriptionView: View {
                 Image(systemName: item.english.contains("未") ? "xmark.circle.fill" : "checkmark.circle.fill")
                     .foregroundStyle(item.english.contains("未") ? .orange : .green)
                 Text(item.english.replacingOccurrences(of: "[自检] ", with: ""))
-                    .font(.callout.weight(.medium))
+                    .font(centerWallFont(weight: .medium))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -1188,11 +1298,11 @@ struct TranscriptionView: View {
                 if block.canInterleaveLineByLine {
                     ForEach(block.englishLines.indices, id: \.self) { idx in
                         Text("🇬🇧 \(block.englishLines[idx])")
-                            .font(.system(size: 15))
+                            .font(centerWallFont())
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("🇨🇳 \(block.chineseLines[idx])")
-                            .font(.system(size: 14))
+                            .font(centerWallFont())
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1200,13 +1310,13 @@ struct TranscriptionView: View {
                 } else {
                     ForEach(block.englishLines.indices, id: \.self) { idx in
                         Text("🇬🇧 \(block.englishLines[idx])")
-                            .font(.system(size: 15))
+                            .font(centerWallFont())
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if vm.translationEnabled, !block.chineseLines.isEmpty {
                         Text("🇨🇳 \(block.chineseLines.joined(separator: " "))")
-                            .font(.system(size: 14))
+                            .font(centerWallFont())
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1224,9 +1334,9 @@ struct TranscriptionView: View {
     private func dynamicItemView(_ item: TranscriptionItem) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("🇬🇧").font(.caption)
+                Text("🇬🇧").font(centerWallFont())
                 Text(item.english.replacingOccurrences(of: "\n", with: " "))
-                    .font(.system(size: 15))
+                    .font(centerWallFont())
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
                 statusView(for: item.status)
@@ -1235,9 +1345,9 @@ struct TranscriptionView: View {
 
             if vm.translationEnabled, let zh = item.chinese, item.status == .done {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("🇨🇳").font(.caption)
+                    Text("🇨🇳").font(centerWallFont())
                     Text(zh.replacingOccurrences(of: "\n", with: " "))
-                        .font(.system(size: 14))
+                        .font(centerWallFont())
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1254,19 +1364,19 @@ struct TranscriptionView: View {
         switch status {
         case .whispering:
             Text("[Processing...]")
-                .font(.caption2)
+                .font(centerWallFont())
                 .foregroundColor(.orange)
         case .llmFormatting:
             Text("[Refining...]")
-                .font(.caption2)
+                .font(centerWallFont())
                 .foregroundColor(.orange)
         case .llmAggregating:
             Text("[Aggregating...]")
-                .font(.caption2)
+                .font(centerWallFont())
                 .foregroundColor(.orange)
         case .organizing:
             Text("[Organizing...]")
-                .font(.caption2)
+                .font(centerWallFont())
                 .foregroundColor(.orange)
         case .translating:
             ProgressView()
@@ -1286,6 +1396,7 @@ struct TranscriptionView: View {
         }
         normalizeCourseSelection()
         vm.startNewRecordWithoutSelfCheck()
+        vm.runSystemCheck()
         activeNotePreview = nil
         workspaceMode = .transcription
     }

@@ -91,6 +91,7 @@ final class TranscriptionViewModel: ObservableObject {
     private let llmService = LLMService()
     private let translationService = TranslationService()
     private let nvidiaSummaryService = NvidiaSummaryService()
+    private let agnesHistoryOrganizerService = AgnesHistoryOrganizerService()
     private let modelDiscoveryService = LLMModelDiscoveryService()
 
     // 队列
@@ -122,6 +123,12 @@ final class TranscriptionViewModel: ObservableObject {
     private var dynamicIdleFlushTask: Task<Void, Never>?
     private var summaryTask: Task<Void, Never>?
     private var finalSummaryTask: Task<Void, Never>?
+    private var agnesOrganizationTask: Task<Void, Never>?
+    private var isAgnesOrganizing = false
+    private var pendingAgnesOrganization = false
+    private var historyItemsAddedSinceAgnesOrganization = 0
+    private let agnesOrganizationTriggerCount = 2
+    private let agnesRealtimeWindowSize = 12
 
     private let forbiddenEnds: Set<String> = [
         "of", "the", "and", "or", "a", "an", "is", "are", "in", "on", "at",
@@ -343,8 +350,8 @@ final class TranscriptionViewModel: ObservableObject {
             }
             print("[TranscriptionViewModel] WhisperKit ready: \(whisperReady)")
 
-            // 4️⃣ Groq 核心 + NVIDIA 总结测试
-            setStatus(.checking("测试 Groq 与 NVIDIA 总结..."))
+            // 4️⃣ Groq 核心 + NVIDIA 总结 + Agnes 整理测试
+            setStatus(.checking("测试 Groq、NVIDIA 与 Agnes..."))
             let groqResult = await llmService.testConnectivity(
                 credential: LLMProviderCatalog.groqCoreCredential(
                     from: providerAPIKeys,
@@ -357,14 +364,17 @@ final class TranscriptionViewModel: ObservableObject {
                     selectedModelNames: selectedProviderModelNames
                 )
             )
-            let mergedResults = [groqResult, summaryResult]
+            let agnesResult = await agnesHistoryOrganizerService.testConnectivity(
+                credential: LLMProviderCatalog.agnesOrganizerCredential(from: providerAPIKeys)
+            )
+            let mergedResults = [groqResult, summaryResult, agnesResult]
             providerCheckResults = mergedResults
             recordProviderModelConnectivity(mergedResults)
             apiReady = groqResult.passed
             translationEnabled = apiReady
             liveSummaryReady = summaryResult.passed
             liveSummaryStatus = liveSummaryReady ? "等待历史内容" : summaryResult.status.displayText
-            print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), NVIDIA summary: \(summaryResult.status.displayText)")
+            print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), NVIDIA summary: \(summaryResult.status.displayText), Agnes organizer: \(agnesResult.status.displayText)")
 
             publishSelfCheckSummary(
                 microphone: microphoneReady,
@@ -416,6 +426,8 @@ final class TranscriptionViewModel: ObservableObject {
             return groqModelOptions
         case .nvidia:
             return nvidiaSummaryModelOptions
+        case .agnes:
+            return LLMProviderCatalog.models(for: .agnes)
         }
     }
 
@@ -595,6 +607,7 @@ final class TranscriptionViewModel: ObservableObject {
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
         isLiveSummaryUpdating = false
         liveSummaryCursor.reset()
+        resetAgnesOrganizationState()
         llmQueueSize = 0
         whisperQueueSize = 0
         lastRenderTime = Date().timeIntervalSince1970
@@ -699,6 +712,7 @@ final class TranscriptionViewModel: ObservableObject {
         if wasRecording {
             for i in 0..<dynamicItems.count { dynamicItems[i].zone = .history }
             historyItems.append(contentsOf: dynamicItems)
+            _ = applyLocalHistoryCleanup()
         }
         dynamicItems = []
         draftText = ""
@@ -734,6 +748,9 @@ final class TranscriptionViewModel: ObservableObject {
         let summaryService = nvidiaSummaryService
 
         finalSummaryTask = Task { [weak self] in
+            let agnesFinalTask = Task { [weak self] in
+                await self?.runFinalAgnesHistoryOrganizationIfAvailable()
+            }
             var finalSummary: String?
             if shouldRequestDetailedSummary, let credential {
                 finalSummary = await summaryService.summarizeFinalDetailed(
@@ -742,6 +759,7 @@ final class TranscriptionViewModel: ObservableObject {
                     credential: credential
                 )
             }
+            await agnesFinalTask.value
 
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
@@ -794,6 +812,7 @@ final class TranscriptionViewModel: ObservableObject {
         volumePollTask?.cancel()
         dynamicIdleFlushTask?.cancel()
         summaryTask?.cancel()
+        agnesOrganizationTask?.cancel()
 
         whisperWorkerTask = nil
         llmWorkerTask = nil
@@ -803,7 +822,10 @@ final class TranscriptionViewModel: ObservableObject {
         volumePollTask = nil
         dynamicIdleFlushTask = nil
         summaryTask = nil
+        agnesOrganizationTask = nil
         isLiveSummaryUpdating = false
+        isAgnesOrganizing = false
+        pendingAgnesOrganization = false
     }
 
     func prepareRestart() {
@@ -821,6 +843,7 @@ final class TranscriptionViewModel: ObservableObject {
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
         liveSummaryCursor.reset()
+        resetAgnesOrganizationState()
         setStatus(translationEnabled
             ? .ready("🟢 引擎已重置，随时可启动")
             : .ready("🟢 引擎已重置（本地模式）"))
@@ -846,6 +869,7 @@ final class TranscriptionViewModel: ObservableObject {
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
         liveSummaryCursor.reset()
+        resetAgnesOrganizationState()
         canRestart = false
         renderUI(force: true)
     }
@@ -862,7 +886,12 @@ final class TranscriptionViewModel: ObservableObject {
             "[自检] Sherpa: \(sherpa ? "通过" : "未通过")",
             "[自检] WhisperKit large-v3: \(whisper ? "通过" : "未通过")"
         ]
-        messages.append(contentsOf: providerResults.map {
+        messages.append(contentsOf: providerResults.filter { result in
+            if result.provider.id == .agnes, result.status == .notConfigured {
+                return false
+            }
+            return true
+        }.map {
             "[自检] \($0.provider.displayName) / \($0.provider.modelName): \($0.status.displayText)"
         })
         historyItems.append(contentsOf: messages.map {
@@ -1410,7 +1439,155 @@ final class TranscriptionViewModel: ObservableObject {
         }
         historyItems.append(item)
         dynamicItems.remove(at: index)
+        noteHistoryItemMovedForAgnesOrganization()
         maybeRequestLiveSummary()
+    }
+
+    private func noteHistoryItemMovedForAgnesOrganization() {
+        _ = applyLocalHistoryCleanup()
+        historyItemsAddedSinceAgnesOrganization += 1
+        scheduleAgnesHistoryOrganizationIfNeeded()
+    }
+
+    @discardableResult
+    private func applyLocalHistoryCleanup() -> Bool {
+        let before = historyCleanupSnapshot()
+        historyItems = HistoryWallCleaner.clean(historyItems)
+        return before != historyCleanupSnapshot()
+    }
+
+    private func historyCleanupSnapshot() -> [String] {
+        historyItems.map {
+            "\($0.id.uuidString)|\($0.english)|\($0.chinese ?? "")|\($0.status.rawValue)|\($0.isVisible)"
+        }
+    }
+
+    private func scheduleAgnesHistoryOrganizationIfNeeded(force: Bool = false) {
+        guard force || historyItemsAddedSinceAgnesOrganization >= agnesOrganizationTriggerCount else { return }
+        guard let credential = agnesOrganizerCredential() else { return }
+
+        if isAgnesOrganizing {
+            pendingAgnesOrganization = true
+            return
+        }
+
+        let snapshot = agnesOrganizerItems(finalPass: false)
+        guard snapshot.count >= 2 else { return }
+
+        historyItemsAddedSinceAgnesOrganization = 0
+        isAgnesOrganizing = true
+        pendingAgnesOrganization = false
+        let course = currentCourse
+        let service = agnesHistoryOrganizerService
+
+        agnesOrganizationTask = Task { [weak self] in
+            let updates = await service.organizeHistory(
+                items: snapshot,
+                credential: credential,
+                course: course,
+                polishTranslations: false
+            )
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.finishAgnesHistoryOrganization(updates: updates)
+            }
+        }
+    }
+
+    private func finishAgnesHistoryOrganization(updates: [AgnesHistoryOrganizerUpdate]?) {
+        isAgnesOrganizing = false
+        agnesOrganizationTask = nil
+        if let updates, applyAgnesHistoryUpdates(updates) {
+            syncFileOnQueue()
+            renderUI(force: true)
+        }
+
+        if pendingAgnesOrganization {
+            pendingAgnesOrganization = false
+            scheduleAgnesHistoryOrganizationIfNeeded(force: true)
+        }
+    }
+
+    private func runFinalAgnesHistoryOrganizationIfAvailable() async {
+        guard let credential = agnesOrganizerCredential() else { return }
+        _ = applyLocalHistoryCleanup()
+        let snapshot = agnesOrganizerItems(finalPass: true)
+        guard !snapshot.isEmpty else { return }
+
+        let updates = await agnesHistoryOrganizerService.organizeHistory(
+            items: snapshot,
+            credential: credential,
+            course: currentCourse,
+            polishTranslations: true
+        )
+        guard !Task.isCancelled else { return }
+        if let updates, applyAgnesHistoryUpdates(updates) {
+            syncFileOnQueue()
+            renderUI(force: true)
+        }
+    }
+
+    private func agnesOrganizerItems(finalPass: Bool) -> [AgnesHistoryOrganizerItem] {
+        let items = historyItems.filter {
+            $0.zone == .history &&
+                $0.isVisible &&
+                !$0.isSystemMessage &&
+                $0.status != .dropped &&
+                !$0.english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let selected = finalPass ? items : Array(items.suffix(agnesRealtimeWindowSize))
+        return selected.map {
+            AgnesHistoryOrganizerItem(
+                id: $0.id.uuidString,
+                english: $0.english,
+                chinese: $0.chinese
+            )
+        }
+    }
+
+    @discardableResult
+    private func applyAgnesHistoryUpdates(_ updates: [AgnesHistoryOrganizerUpdate]) -> Bool {
+        var changed = false
+        for update in updates {
+            guard let id = UUID(uuidString: update.id),
+                  let idx = historyItems.firstIndex(where: { $0.id == id }),
+                  !historyItems[idx].isSystemMessage
+            else { continue }
+
+            if update.drop == true {
+                if historyItems[idx].isVisible || historyItems[idx].status != .dropped {
+                    historyItems[idx].isVisible = false
+                    historyItems[idx].status = .dropped
+                    changed = true
+                }
+                continue
+            }
+
+            if let english = update.english?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !english.isEmpty,
+               english != historyItems[idx].english {
+                historyItems[idx].english = english
+                changed = true
+            }
+
+            if let chinese = update.chinese?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !chinese.isEmpty,
+               historyItems[idx].chinese != nil,
+               chinese != historyItems[idx].chinese {
+                historyItems[idx].chinese = chinese
+                changed = true
+            }
+        }
+
+        return applyLocalHistoryCleanup() || changed
+    }
+
+    private func resetAgnesOrganizationState() {
+        agnesOrganizationTask?.cancel()
+        agnesOrganizationTask = nil
+        isAgnesOrganizing = false
+        pendingAgnesOrganization = false
+        historyItemsAddedSinceAgnesOrganization = 0
     }
 
     private func getRecentContext() -> String {
@@ -1718,6 +1895,13 @@ final class TranscriptionViewModel: ObservableObject {
             from: providerAPIKeys,
             selectedModelNames: selectedProviderModelNames
         )
+    }
+
+    private func agnesOrganizerCredential() -> LLMProviderCredential? {
+        guard providerCheckResults.first(where: { $0.provider.id == .agnes })?.passed == true else {
+            return nil
+        }
+        return LLMProviderCatalog.agnesOrganizerCredential(from: providerAPIKeys)
     }
 
     private func groqAPIKey() -> String {

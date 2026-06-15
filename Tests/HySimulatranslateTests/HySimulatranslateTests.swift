@@ -314,6 +314,7 @@ final class HySimulatranslateTests: XCTestCase {
     func testLLMProviderCatalogSeparatesGroqCoreAndNvidiaSummaryModelsWithGetLinks() throws {
         let groq = try XCTUnwrap(LLMProviderCatalog.groqCoreProvider)
         let nvidia = try XCTUnwrap(LLMProviderCatalog.nvidiaSummaryProvider)
+        let agnes = try XCTUnwrap(LLMProviderCatalog.agnesOrganizerProvider)
 
         XCTAssertEqual(groq.displayName, "Groq")
         XCTAssertEqual(groq.modelName, "llama-3.3-70b-versatile")
@@ -323,29 +324,46 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(nvidia.modelName, "nvidia/llama-3.3-nemotron-super-49b-v1")
         XCTAssertEqual(nvidia.getAPIKeyURL.absoluteString, "https://build.nvidia.com")
         XCTAssertGreaterThanOrEqual(nvidia.timeout, 20)
+
+        XCTAssertEqual(agnes.displayName, "Agnes 整理")
+        XCTAssertEqual(agnes.modelName, "agnes-2.0-flash")
+        XCTAssertEqual(agnes.chatCompletionsURL.absoluteString, "https://apihub.agnes-ai.com/v1/chat/completions")
+        XCTAssertTrue(agnes.acceptsKey("sk-test-key"))
     }
 
     func testLLMProviderCredentialsKeepGroqCoreSeparateFromNvidiaSummary() {
         let keys: [LLMProviderID: String] = [
             .groq: "gsk_test_key",
-            .nvidia: "nvapi-test-key"
+            .nvidia: "nvapi-test-key",
+            .agnes: "sk-test-key"
         ]
 
         let coreCredential = LLMProviderCatalog.groqCoreCredential(from: keys)
         let summaryCredential = LLMProviderCatalog.nvidiaSummaryCredential(from: keys)
+        let organizerCredential = LLMProviderCatalog.agnesOrganizerCredential(from: keys)
 
         XCTAssertEqual(coreCredential?.provider.id, .groq)
         XCTAssertEqual(summaryCredential?.provider.id, .nvidia)
+        XCTAssertEqual(organizerCredential?.provider.id, .agnes)
     }
 
     func testLLMProviderModelListsContainOnlyFreeDefaults() {
         let groqModels = LLMProviderCatalog.models(for: .groq)
         let nvidiaModels = LLMProviderCatalog.models(for: .nvidia)
+        let agnesModels = LLMProviderCatalog.models(for: .agnes)
 
         XCTAssertEqual(groqModels.first?.id, LLMProviderCatalog.defaultGroqModelName)
         XCTAssertEqual(groqModels.first?.freeStatus, .free)
         XCTAssertEqual(nvidiaModels.first?.id, LLMProviderCatalog.defaultNvidiaSummaryModelName)
         XCTAssertEqual(nvidiaModels.first?.freeStatus, .free)
+        XCTAssertEqual(agnesModels, [
+            LLMProviderModel(
+                providerID: .agnes,
+                id: LLMProviderCatalog.defaultAgnesOrganizerModelName,
+                freeStatus: .free,
+                recommendationScore: 100
+            )
+        ])
         XCTAssertFalse(nvidiaModels.contains { $0.id == "nvidia/llama-3.3-nemotron-super-49b-v1.5" })
         XCTAssertTrue(groqModels.allSatisfy { $0.freeStatus == .free })
         XCTAssertTrue(nvidiaModels.allSatisfy { $0.freeStatus == .free })
@@ -378,6 +396,59 @@ final class HySimulatranslateTests: XCTestCase {
 
         XCTAssertEqual(groq.map(\.id), ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
         XCTAssertEqual(nvidia.map(\.id), ["nvidia/llama-3.3-nemotron-super-49b-v1"])
+    }
+
+    func testAgnesHistoryOrganizerValidationRejectsMissingIDsAndExpansions() {
+        let items = [
+            AgnesHistoryOrganizerItem(id: "a", english: "The AI factory started with Nvidia.", chinese: "AI 工厂始于 Nvidia。"),
+            AgnesHistoryOrganizerItem(id: "b", english: "Nvidia provided the first platform.", chinese: "Nvidia 提供了第一个平台。")
+        ]
+        let valid = """
+        {"updates":[
+          {"id":"a","english":"The AI factory started with Nvidia.","chinese":"AI 工厂始于 Nvidia。","drop":false},
+          {"id":"b","english":"Nvidia provided the first platform.","chinese":"Nvidia 提供了第一个平台。","drop":false}
+        ]}
+        """
+        let missing = """
+        {"updates":[
+          {"id":"a","english":"The AI factory started with Nvidia.","chinese":"AI 工厂始于 Nvidia。","drop":false}
+        ]}
+        """
+        let expanded = """
+        {"updates":[
+          {"id":"a","english":"The AI factory started with Nvidia and then this model invents an entire extra explanation about markets, architecture, products, strategy, roadmap, pricing, customers, revenue, competitors, and many facts that were never in the transcript.","chinese":"AI 工厂始于 Nvidia。","drop":false},
+          {"id":"b","english":"Nvidia provided the first platform.","chinese":"Nvidia 提供了第一个平台。","drop":false}
+        ]}
+        """
+
+        XCTAssertEqual(AgnesHistoryOrganizerService.validatedUpdates(from: valid, originalItems: items)?.count, 2)
+        XCTAssertNil(AgnesHistoryOrganizerService.validatedUpdates(from: missing, originalItems: items))
+        XCTAssertNil(AgnesHistoryOrganizerService.validatedUpdates(from: expanded, originalItems: items))
+    }
+
+    func testHistoryWallCleanerDropsDuplicatesAndTrimsAdjacentBoundaryOverlap() {
+        let first = TranscriptionItem(
+            english: "The product roadmap is clear customer support workflow automation",
+            status: .done,
+            zone: .history
+        )
+        let second = TranscriptionItem(
+            english: "support workflow automation will launch next quarter.",
+            status: .done,
+            zone: .history
+        )
+        let duplicate = TranscriptionItem(
+            english: "support workflow automation will launch next quarter.",
+            status: .done,
+            zone: .history
+        )
+
+        let cleaned = HistoryWallCleaner.clean([first, second, duplicate])
+
+        XCTAssertEqual(cleaned[0].english, "The product roadmap is clear customer")
+        XCTAssertTrue(cleaned[1].isVisible)
+        XCTAssertFalse(cleaned[2].isVisible)
+        XCTAssertEqual(cleaned[2].status, .dropped)
     }
 
     func testFailedConnectivityRecordsSinkModelsButKeepRecommendationOrder() {
@@ -1154,12 +1225,14 @@ final class HySimulatranslateTests: XCTestCase {
         let vm = TranscriptionViewModel()
         vm.updateProviderAPIKeys([
             .groq: "gsk_test_key",
-            .nvidia: "nvapi-test-key"
+            .nvidia: "nvapi-test-key",
+            .agnes: "sk-test-key"
         ])
 
         XCTAssertEqual(vm.providerAPIKeys[.groq], "gsk_test_key")
         XCTAssertEqual(vm.providerAPIKeys[.nvidia], "nvapi-test-key")
-        XCTAssertEqual(vm.providerCheckResults.count, 2)
+        XCTAssertEqual(vm.providerAPIKeys[.agnes], "sk-test-key")
+        XCTAssertEqual(vm.providerCheckResults.count, 3)
     }
 
     @MainActor

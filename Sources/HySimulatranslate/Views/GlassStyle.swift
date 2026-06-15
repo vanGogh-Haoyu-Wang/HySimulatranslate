@@ -86,8 +86,8 @@ extension View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(.white.opacity(0.16), lineWidth: 1)
+                .stroke(.white.opacity(0.20), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.10), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.16), radius: 18, y: 8)
     }
 }

@@ -104,7 +104,7 @@ enum ItemZone: String {
 }
 
 // MARK: - 强化专项
-struct CourseSubject: Identifiable, Codable, Equatable {
+struct CourseSubject: Identifiable, Codable, Equatable, Sendable {
     var id = UUID()
     var name: String
     var abbrev: String

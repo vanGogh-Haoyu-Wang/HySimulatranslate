@@ -96,6 +96,9 @@ struct StartupView: View {
                 if let nvidia = LLMProviderCatalog.nvidiaSummaryProvider {
                     providerRow(nvidia, title: "NVIDIA 总结")
                 }
+                if let agnes = LLMProviderCatalog.agnesOrganizerProvider {
+                    providerRow(agnes, title: "Agnes 整理")
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

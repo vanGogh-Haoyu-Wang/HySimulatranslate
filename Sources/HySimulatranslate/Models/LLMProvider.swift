@@ -3,6 +3,7 @@ import Foundation
 enum LLMProviderID: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
     case groq
     case nvidia
+    case agnes
 
     var id: String { rawValue }
 }
@@ -119,6 +120,7 @@ struct LLMProviderCheckResult: Equatable, Sendable {
 enum LLMProviderCatalog {
     static let defaultGroqModelName = "llama-3.3-70b-versatile"
     static let defaultNvidiaSummaryModelName = "nvidia/llama-3.3-nemotron-super-49b-v1"
+    static let defaultAgnesOrganizerModelName = "agnes-2.0-flash"
 
     static let allProviders: [LLMProvider] = [
         LLMProvider(
@@ -144,6 +146,18 @@ enum LLMProviderCatalog {
             keyPlaceholder: "nvapi-...",
             requiredKeyPrefix: "nvapi-",
             timeout: 25.0
+        ),
+        LLMProvider(
+            id: .agnes,
+            displayName: "Agnes 整理",
+            modelName: defaultAgnesOrganizerModelName,
+            chatCompletionsURL: URL(string: "https://apihub.agnes-ai.com/v1/chat/completions")!,
+            modelsURL: URL(string: "https://apihub.agnes-ai.com/v1/models")!,
+            getAPIKeyURL: URL(string: "https://agnes-ai.com")!,
+            keychainAccount: "agnes_api_key",
+            keyPlaceholder: "sk-...",
+            requiredKeyPrefix: "sk-",
+            timeout: 15.0
         )
     ]
 
@@ -155,12 +169,23 @@ enum LLMProviderCatalog {
         LLMProviderModel(providerID: .nvidia, id: $0.key, freeStatus: .free, recommendationScore: $0.value)
     })
 
+    static let agnesOrganizerModels: [LLMProviderModel] = [
+        LLMProviderModel(
+            providerID: .agnes,
+            id: defaultAgnesOrganizerModelName,
+            freeStatus: .free,
+            recommendationScore: 100
+        )
+    ]
+
     static func models(for id: LLMProviderID) -> [LLMProviderModel] {
         switch id {
         case .groq:
             return groqCoreModels
         case .nvidia:
             return nvidiaSummaryModels
+        case .agnes:
+            return agnesOrganizerModels
         }
     }
 
@@ -197,6 +222,15 @@ enum LLMProviderCatalog {
                     recommendationScore: recommendationScore(for: providerID, modelID: id)
                 )
             }
+        case .agnes:
+            if id == defaultAgnesOrganizerModelName {
+                return LLMProviderModel(
+                    providerID: providerID,
+                    id: id,
+                    freeStatus: .free,
+                    recommendationScore: recommendationScore(for: providerID, modelID: id)
+                )
+            }
         }
 
         guard preserveUnknown else { return nil }
@@ -224,6 +258,10 @@ enum LLMProviderCatalog {
         provider(for: .nvidia)
     }
 
+    static var agnesOrganizerProvider: LLMProvider? {
+        provider(for: .agnes)
+    }
+
     static func groqCoreCredential(from keys: [LLMProviderID: String]) -> LLMProviderCredential? {
         credential(for: .groq, from: keys)
     }
@@ -244,6 +282,10 @@ enum LLMProviderCatalog {
         selectedModelNames: [LLMProviderID: String]
     ) -> LLMProviderCredential? {
         credential(for: .nvidia, from: keys, selectedModelNames: selectedModelNames)
+    }
+
+    static func agnesOrganizerCredential(from keys: [LLMProviderID: String]) -> LLMProviderCredential? {
+        credential(for: .agnes, from: keys)
     }
 
     static func credential(
@@ -376,6 +418,8 @@ enum LLMProviderCatalog {
             if let score = groqKnownFreeTextModels[id] { return score }
         case .nvidia:
             if let score = nvidiaKnownFreeSummaryModels[id] { return score }
+        case .agnes:
+            if id == defaultAgnesOrganizerModelName { return 100 }
         }
         if id.contains("gpt-oss-120b") { return 98 }
         if id.contains("super-49b-v1") && !id.contains("v1.5") { return 100 }
