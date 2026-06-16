@@ -7,6 +7,7 @@ struct TranscriptionView: View {
     @ObservedObject var courseDB: CourseDatabase
     @Binding var providerAPIKeys: [LLMProviderID: String]
     @Binding var selectedCourseIndex: Int
+    let isWindowFullScreen: Bool
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
@@ -26,7 +27,8 @@ struct TranscriptionView: View {
     private let titlebarLeadingPadding: CGFloat = 16
     // SwiftUI points, not screenshot pixels; keeps title text clear of macOS titlebar controls.
     private let collapsedTitlebarLeadingPadding: CGFloat = 162
-    private let titlebarControlsLeadingPadding: CGFloat = 92
+    private let windowTitlebarControlsLeadingPadding: CGFloat = 92
+    private let fullscreenTitlebarControlsLeadingPadding: CGFloat = 14
     private let titlebarControlsTopPadding: CGFloat = 10
     private let titlebarControlSize: CGFloat = 22
     private let centerWallTextSize: CGFloat = 13
@@ -58,14 +60,27 @@ struct TranscriptionView: View {
         isDarkSurface ? .white.opacity(0.06) : .white.opacity(0.34)
     }
 
-    private var deepGlassOverlay: Color {
-        isDarkSurface
-            ? .black.opacity(0.34)
-            : Color(red: 0.43, green: 0.69, blue: 0.90).opacity(0.38)
+    private var titlebarControlsLeadingPadding: CGFloat {
+        isWindowFullScreen
+            ? fullscreenTitlebarControlsLeadingPadding
+            : windowTitlebarControlsLeadingPadding
+    }
+
+    private var sidebarGlassOverlayColor: Color {
+        switch (isWindowFullScreen, isDarkSurface) {
+        case (true, false):
+            return Color(red: 0.91, green: 0.88, blue: 0.84).opacity(0.92)
+        case (true, true):
+            return Color(red: 0.25, green: 0.23, blue: 0.20).opacity(0.86)
+        case (false, false):
+            return Color(red: 0.90, green: 0.87, blue: 0.83).opacity(0.58)
+        case (false, true):
+            return .black.opacity(0.50)
+        }
     }
 
     private var sidebarRowBackgroundColor: Color {
-        isDarkSurface ? .white.opacity(0.07) : .black.opacity(0.08)
+        isDarkSurface ? .white.opacity(0.07) : .black.opacity(0.055)
     }
 
     private var sidebarSelectedRowBackgroundColor: Color {
@@ -143,7 +158,7 @@ struct TranscriptionView: View {
                 .fill(.ultraThinMaterial)
                 .ignoresSafeArea()
             Rectangle()
-                .fill(deepGlassOverlay)
+                .fill(sidebarGlassOverlayColor)
                 .ignoresSafeArea()
 
             GeometryReader { proxy in
@@ -198,6 +213,7 @@ struct TranscriptionView: View {
         }
         .onAppear {
             vm.refreshNoteRecords()
+            vm.refreshAudioCaptureSources()
             if courseDB.allSubjects.isEmpty {
                 workspaceMode = .courseSelection
             }
@@ -422,10 +438,7 @@ struct TranscriptionView: View {
                 Spacer(minLength: 16)
 
                 HStack(spacing: 6) {
-                    Image(systemName: "mic")
-                        .foregroundStyle(.secondary)
-                    Text(vm.micDeviceName.isEmpty ? "未连接麦克风" : vm.micDeviceName)
-                        .lineLimit(1)
+                    audioCaptureSourceMenu
                     Divider()
                         .frame(height: 14)
                     Text("W\(vm.whisperQueueSize) / L\(vm.llmQueueSize)")
@@ -473,6 +486,49 @@ struct TranscriptionView: View {
                 .fill(workSurfaceBorderColor)
                 .frame(height: 1)
         }
+    }
+
+    private var audioCaptureSourceMenu: some View {
+        Menu {
+            ForEach(vm.availableAudioCaptureSources) { source in
+                Button {
+                    vm.selectAudioCaptureSource(source)
+                } label: {
+                    Label(audioSourceMenuTitle(for: source), systemImage: source.systemImage)
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: vm.selectedAudioCaptureSource.systemImage)
+                Text(selectedAudioSourceTitle)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: true, vertical: false)
+        .disabled(vm.isRecording || vm.isFinalizingSession || isChecking)
+        .help("选择音频来源。电脑音频模式会同时收录麦克风，建议戴耳机避免外放重复。")
+    }
+
+    private var selectedAudioSourceTitle: String {
+        if vm.selectedAudioCaptureSource.kind == .microphone {
+            let name = vm.micDeviceName.isEmpty ? "麦克风" : vm.micDeviceName
+            return "\(name) · \(vm.microphoneReady ? "已授权" : "待授权")"
+        }
+        return "\(vm.selectedAudioCaptureSource.statusTitle) · \(vm.systemAudioReady ? "已授权" : "待授权")"
+    }
+
+    private func audioSourceMenuTitle(for source: AudioCaptureSource) -> String {
+        if source.kind == .microphone {
+            let name = vm.micDeviceName.isEmpty ? "麦克风" : vm.micDeviceName
+            return "\(name) · \(vm.microphoneReady ? "已授权" : "待授权")"
+        }
+        return "\(source.menuTitle) · \(vm.systemAudioReady && source == vm.selectedAudioCaptureSource ? "已授权" : "待授权")"
     }
 
     private var mainContentRow: some View {

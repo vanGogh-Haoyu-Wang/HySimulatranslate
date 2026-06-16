@@ -22,6 +22,7 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var downloadProgress: Double = 0.0
     @Published var downloadStatus: String = ""
     @Published var microphoneReady = false
+    @Published var systemAudioReady = false
     @Published var sherpaReady = false
     @Published var whisperReady = false
     @Published var apiReady = false
@@ -35,6 +36,9 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var nvidiaSummaryModelOptions: [LLMProviderModel] = LLMProviderCatalog.models(for: .nvidia)
     @Published var isRefreshingProviderModels = false
     @Published var providerModelRefreshStatus = ""
+    @Published var selectedAudioCaptureSource: AudioCaptureSource = .microphone
+    @Published var availableAudioCaptureSources: [AudioCaptureSource] = [.microphone, .systemAudio]
+    @Published var audioCaptureSourceStatus = ""
     @Published var noteRecords: [NoteRecord] = []
     @Published var selectedNoteRecord: NoteRecord?
     @Published var notePreviewText: String = ""
@@ -44,6 +48,7 @@ final class TranscriptionViewModel: ObservableObject {
     @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
     @AppStorage("groqCoreModelName") var groqCoreModelName: String = LLMProviderCatalog.defaultGroqModelName
     @AppStorage("nvidiaSummaryModelName") var nvidiaSummaryModelName: String = LLMProviderCatalog.defaultNvidiaSummaryModelName
+    @AppStorage("audioCaptureSource") private var audioCaptureSourceStorage: String = AudioCaptureSource.microphoneStorageValue
     @AppStorage("groqModelOptionsJSON") private var groqModelOptionsJSON: String = ""
     @AppStorage("nvidiaSummaryModelOptionsJSON") private var nvidiaSummaryModelOptionsJSON: String = ""
     @AppStorage("providerModelConnectivityRecordsJSON") private var providerModelConnectivityRecordsJSON: String = ""
@@ -76,7 +81,16 @@ final class TranscriptionViewModel: ObservableObject {
     var canStartTranscription: Bool {
         guard !isFinalizingSession else { return false }
         guard case .ready = engineStatus else { return false }
-        return microphoneReady && sherpaReady && whisperReady
+        return audioCaptureReady && sherpaReady && whisperReady
+    }
+
+    var audioCaptureReady: Bool {
+        switch selectedAudioCaptureSource.kind {
+        case .microphone:
+            return microphoneReady
+        case .systemAudio, .applicationAudio:
+            return microphoneReady && systemAudioReady
+        }
     }
 
     var startTranscriptionButtonTitle: String {
@@ -85,6 +99,8 @@ final class TranscriptionViewModel: ObservableObject {
 
     // Services
     private let speechEngine = SpeechEngine()
+    private let systemAudioCaptureEngine = SystemAudioCaptureEngine()
+    private let audioCaptureCoordinator = AudioCaptureCoordinator()
     private let sherpaService = SherpaService()
     private let whisperKitService = WhisperKitService()
     private let speechDenoiserService = SpeechDenoiserService()
@@ -140,6 +156,13 @@ final class TranscriptionViewModel: ObservableObject {
     private var isChecking = false
 
     init() {
+        let hadDeprecatedApplicationAudio = AudioCaptureSource.containsDeprecatedApplicationAudio(audioCaptureSourceStorage)
+        selectedAudioCaptureSource = AudioCaptureSource.fromStorageValue(audioCaptureSourceStorage)
+        if hadDeprecatedApplicationAudio {
+            audioCaptureSourceStorage = selectedAudioCaptureSource.storageValue
+            audioCaptureSourceStatus = "已切换为全系统音频，避免应用捕获授权冲突"
+        }
+        availableAudioCaptureSources = Self.supportedAudioCaptureSources(selected: selectedAudioCaptureSource)
         providerModelConnectivityRecords = Self.decodeConnectivityRecords(from: providerModelConnectivityRecordsJSON)
         groqModelOptions = normalizedProviderModelOptions(
             for: .groq,
@@ -149,6 +172,42 @@ final class TranscriptionViewModel: ObservableObject {
             for: .nvidia,
             models: Self.decodeModels(from: nvidiaSummaryModelOptionsJSON) ?? LLMProviderCatalog.models(for: .nvidia)
         )
+    }
+
+    func selectAudioCaptureSource(_ source: AudioCaptureSource) {
+        guard !isRecording, !isFinalizingSession else { return }
+        let normalizedSource = Self.normalizeAudioCaptureSource(source)
+        selectedAudioCaptureSource = normalizedSource
+        audioCaptureSourceStorage = normalizedSource.storageValue
+        availableAudioCaptureSources = Self.supportedAudioCaptureSources(selected: normalizedSource)
+        if normalizedSource.kind == .microphone {
+            systemAudioReady = false
+            audioCaptureSourceStatus = microphoneReady ? micDeviceName : "音频源已更改，请重新自检"
+        } else {
+            systemAudioReady = false
+            if source.kind == .applicationAudio {
+                audioCaptureSourceStatus = "已切换为全系统音频，避免应用捕获授权冲突"
+            } else {
+                audioCaptureSourceStatus = microphoneReady
+                    ? "麦克风已通过；电脑音频待自检"
+                    : "音频源已更改，请重新自检"
+            }
+        }
+        if case .ready = engineStatus {
+            setStatus(.ready(audioCaptureSourceStatus))
+        }
+        publishSelfCheckSummary(
+            microphone: microphoneReady,
+            audioSourceName: normalizedSource.statusTitle,
+            audioSourceReady: normalizedSource.kind == .microphone ? microphoneReady : false,
+            sherpa: sherpaReady,
+            whisper: whisperReady,
+            providerResults: providerCheckResults
+        )
+    }
+
+    func refreshAudioCaptureSources() {
+        availableAudioCaptureSources = Self.supportedAudioCaptureSources(selected: selectedAudioCaptureSource)
     }
 
     func updateProviderAPIKeys(_ keys: [LLMProviderID: String]) {
@@ -200,7 +259,7 @@ final class TranscriptionViewModel: ObservableObject {
         notePreviewText = ""
         notePreviewStatus = ""
         filePath = nil
-        if microphoneReady && sherpaReady && whisperReady {
+        if audioCaptureReady && sherpaReady && whisperReady {
             setStatus(translationEnabled
                 ? .ready("🟢 新记录已准备，随时可启动")
                 : .ready("🟢 新记录已准备（本地模式）"))
@@ -218,6 +277,8 @@ final class TranscriptionViewModel: ObservableObject {
         downloadProgress = 0.0
         downloadStatus = ""
         microphoneReady = false
+        systemAudioReady = false
+        audioCaptureSourceStatus = ""
         sherpaReady = false
         whisperReady = false
         apiReady = false
@@ -248,6 +309,28 @@ final class TranscriptionViewModel: ObservableObject {
                 )
                 setStatus(.error(micCheck.message))
                 return
+            }
+
+            if selectedAudioCaptureSource.kind == .microphone {
+                systemAudioReady = false
+                audioCaptureSourceStatus = micCheck.message
+            } else {
+                setStatus(.checking("检查电脑音频..."))
+                let systemCheck = await systemAudioCaptureEngine.checkConnectivity(source: selectedAudioCaptureSource)
+                systemAudioReady = systemCheck.passed
+                audioCaptureSourceStatus = systemCheck.message
+                guard systemCheck.passed else {
+                    publishSelfCheckSummary(
+                        microphone: microphoneReady,
+                        audioSourceName: systemCheck.sourceName,
+                        audioSourceReady: false,
+                        sherpa: false,
+                        whisper: false,
+                        providerResults: providerCheckResults
+                    )
+                    setStatus(.error("麦克风已通过；\(systemCheck.message)"))
+                    return
+                }
             }
 
             setStatus(.checking("准备随附模型资源..."))
@@ -383,9 +466,9 @@ final class TranscriptionViewModel: ObservableObject {
                 providerResults: mergedResults
             )
 
-            guard microphoneReady && sherpaReady && whisperReady else {
-                setStatus(.error("自检未通过：Sherpa 和 Whisper large-v3 都必须本地可用"))
-                print("[TranscriptionViewModel] Self-check failed: microphone=\(microphoneReady), sherpa=\(sherpaReady), whisper=\(whisperReady), api=\(apiReady)")
+            guard audioCaptureReady && sherpaReady && whisperReady else {
+                setStatus(.error("自检未通过：音频源、Sherpa 和 Whisper large-v3 都必须可用"))
+                print("[TranscriptionViewModel] Self-check failed: microphone=\(microphoneReady), systemAudio=\(systemAudioReady), source=\(selectedAudioCaptureSource.statusTitle), sherpa=\(sherpaReady), whisper=\(whisperReady), api=\(apiReady)")
                 return
             }
 
@@ -622,7 +705,7 @@ final class TranscriptionViewModel: ObservableObject {
 
             guard await SpeechEngine.requestMicrophoneAccess() else {
                 await MainActor.run {
-                    self.handleStartFailure("麦克风权限未授权。请在系统设置中允许 HySimulatranslate 使用麦克风。")
+                    self.handleStartFailure("麦克风权限未授权，请在系统设置 > 隐私与安全性 > 麦克风中允许。")
                 }
                 return
             }
@@ -661,10 +744,13 @@ final class TranscriptionViewModel: ObservableObject {
             )
             guard self.isRunning else { return }
 
-            // 配置音频采集 → 喂 Sherpa
+            // 配置音频采集 → 串行合流 → 喂 Sherpa
+            await audioCaptureCoordinator.configure { [weak self] samples, sampleRate in
+                await self?.sherpaService.acceptWaveform(samples: samples, sampleRate: sampleRate)
+            }
             speechEngine.configure { [weak self] samples, sampleRate in
                 Task { [weak self] in
-                    await self?.sherpaService.acceptWaveform(samples: samples, sampleRate: sampleRate)
+                    await self?.audioCaptureCoordinator.accept(samples: samples, sampleRate: sampleRate)
                 }
             }
 
@@ -677,6 +763,13 @@ final class TranscriptionViewModel: ObservableObject {
             startDynamicIdleFlushWorker()
 
             do {
+                if selectedAudioCaptureSource.kind != .microphone {
+                    try await systemAudioCaptureEngine.start(source: selectedAudioCaptureSource) { [weak self] samples, sampleRate in
+                        Task { [weak self] in
+                            await self?.audioCaptureCoordinator.accept(samples: samples, sampleRate: sampleRate)
+                        }
+                    }
+                }
                 try speechEngine.start()
                 micDeviceName = speechEngine.micDeviceName
             } catch {
@@ -703,7 +796,7 @@ final class TranscriptionViewModel: ObservableObject {
 
         cancelWorkerTasks()
 
-        speechEngine.stop()
+        stopAudioCapture()
         Task {
             await sherpaService.stopStreaming()
             await llmService.stop()
@@ -794,13 +887,21 @@ final class TranscriptionViewModel: ObservableObject {
         isRecording = false
         canRestart = false
         cancelWorkerTasks()
-        speechEngine.stop()
+        stopAudioCapture()
         Task {
             await sherpaService.stopStreaming()
             await llmService.stop()
         }
         setStatus(.error(message))
         renderUI(force: true)
+    }
+
+    private func stopAudioCapture() {
+        speechEngine.stop()
+        Task { [systemAudioCaptureEngine, audioCaptureCoordinator] in
+            await systemAudioCaptureEngine.stop()
+            await audioCaptureCoordinator.reset()
+        }
     }
 
     private func cancelWorkerTasks() {
@@ -876,13 +977,18 @@ final class TranscriptionViewModel: ObservableObject {
 
     func publishSelfCheckSummary(
         microphone: Bool,
+        audioSourceName: String? = nil,
+        audioSourceReady: Bool? = nil,
         sherpa: Bool,
         whisper: Bool,
         providerResults: [LLMProviderCheckResult]
     ) {
         historyItems.removeAll { $0.isSystemMessage }
+        let sourceName = audioSourceName ?? selectedAudioCaptureSource.statusTitle
+        let sourceReady = audioSourceReady ?? (selectedAudioCaptureSource.kind == .microphone ? microphone : audioCaptureReady)
         var messages = [
             "[自检] 麦克风: \(microphone ? "通过" : "未通过")",
+            "[自检] 音频源: \(sourceName): \(sourceReady ? "通过" : "未通过")",
             "[自检] Sherpa: \(sherpa ? "通过" : "未通过")",
             "[自检] WhisperKit large-v3: \(whisper ? "通过" : "未通过")"
         ]
@@ -1906,6 +2012,37 @@ final class TranscriptionViewModel: ObservableObject {
 
     private func groqAPIKey() -> String {
         providerAPIKeys[.groq, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func supportedAudioCaptureSources(selected: AudioCaptureSource) -> [AudioCaptureSource] {
+        let normalizedSelected = normalizeAudioCaptureSource(selected)
+        var sources = [AudioCaptureSource.microphone, .systemAudio]
+        if !sources.contains(normalizedSelected) {
+            sources.append(normalizedSelected)
+        }
+        return sources.sorted { lhs, rhs in
+            rankAudioSource(lhs) < rankAudioSource(rhs)
+        }
+    }
+
+    private static func normalizeAudioCaptureSource(_ source: AudioCaptureSource) -> AudioCaptureSource {
+        switch source.kind {
+        case .applicationAudio:
+            return .systemAudio
+        case .microphone, .systemAudio:
+            return source
+        }
+    }
+
+    private static func rankAudioSource(_ source: AudioCaptureSource) -> String {
+        switch source.kind {
+        case .microphone:
+            return "0"
+        case .systemAudio:
+            return "1"
+        case .applicationAudio:
+            return "9"
+        }
     }
 
     private func setStatus(_ s: EngineStatus) {

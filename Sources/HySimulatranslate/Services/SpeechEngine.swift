@@ -54,7 +54,7 @@ final class SpeechEngine: NSObject, @unchecked Sendable {
             return MicrophoneCheckResult(
                 passed: false,
                 deviceName: "",
-                message: "麦克风权限未授权。请在系统设置中允许 HySimulatranslate 使用麦克风。"
+                message: "麦克风权限未授权，请在系统设置 > 隐私与安全性 > 麦克风中允许。"
             )
         }
 

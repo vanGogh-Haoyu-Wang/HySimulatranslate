@@ -62,7 +62,11 @@ cat >"$INFO_PLIST" <<PLIST
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>HySimulatranslate needs microphone access to transcribe live audio.</string>
+  <string>HySimulatranslate needs microphone access to record your local speech during interpretation.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>HySimulatranslate needs screen and system audio recording access to capture computer audio from meetings and browser playback.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>HySimulatranslate needs system audio recording access to capture meeting audio from Teams, Zoom, browsers, and other apps.</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>

@@ -4,11 +4,17 @@ import XCTest
 final class HySimulatranslateTests: XCTestCase {
     private var temporaryDirectories: [URL] = []
 
+    override func setUpWithError() throws {
+        UserDefaults.standard.removeObject(forKey: "audioCaptureSource")
+        try super.setUpWithError()
+    }
+
     override func tearDownWithError() throws {
         for directory in temporaryDirectories {
             try? FileManager.default.removeItem(at: directory)
         }
         temporaryDirectories.removeAll()
+        UserDefaults.standard.removeObject(forKey: "audioCaptureSource")
         try super.tearDownWithError()
     }
 
@@ -345,6 +351,65 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(coreCredential?.provider.id, .groq)
         XCTAssertEqual(summaryCredential?.provider.id, .nvidia)
         XCTAssertEqual(organizerCredential?.provider.id, .agnes)
+    }
+
+    func testKeychainProviderKeysPayloadKeepsOnlyNonEmptyKnownProviders() {
+        let payload = KeychainManager.providerKeysPayload([
+            .groq: "  gsk_test  ",
+            .nvidia: "",
+            .agnes: "sk_test"
+        ])
+
+        XCTAssertEqual(payload, [
+            "groq": "gsk_test",
+            "agnes": "sk_test"
+        ])
+    }
+
+    func testKeychainProviderKeysAggregateJSONRoundTrips() {
+        let encoded = KeychainManager.encodeProviderKeys([
+            .groq: "gsk_test",
+            .nvidia: " nvapi_test ",
+            .agnes: "sk_test"
+        ])
+
+        XCTAssertEqual(KeychainManager.decodeProviderKeys(encoded), [
+            .groq: "gsk_test",
+            .nvidia: "nvapi_test",
+            .agnes: "sk_test"
+        ])
+        XCTAssertNil(KeychainManager.decodeProviderKeys("not json"))
+    }
+
+    func testKeychainProviderKeysResolveUsesAggregateWhenPresent() {
+        let aggregate = KeychainManager.encodeProviderKeys([
+            .groq: "gsk_aggregate"
+        ])
+        let resolved = KeychainManager.resolveProviderKeys(aggregate: aggregate)
+
+        XCTAssertEqual(resolved, [.groq: "gsk_aggregate"])
+    }
+
+    func testKeychainProviderKeysResolveReturnsEmptyWhenAggregateMissingOrInvalid() {
+        XCTAssertEqual(KeychainManager.resolveProviderKeys(aggregate: nil), [:])
+        XCTAssertEqual(KeychainManager.resolveProviderKeys(aggregate: "not json"), [:])
+    }
+
+    func testKeychainProviderKeysCanMigrateLegacyAccountsWhenExplicitlyRequested() {
+        let legacyValues = [
+            "groq_api_key": "gsk_legacy",
+            "nvidia_api_key": " nvapi_legacy ",
+            "agnes_api_key": "sk_legacy"
+        ]
+        let migrated = KeychainManager.migrateLegacyProviderKeys { account in
+            legacyValues[account]
+        }
+
+        XCTAssertEqual(migrated, [
+            .groq: "gsk_legacy",
+            .nvidia: "nvapi_legacy",
+            .agnes: "sk_legacy"
+        ])
     }
 
     func testLLMProviderModelListsContainOnlyFreeDefaults() {
@@ -852,6 +917,122 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
+    func testStartGateRequiresSystemAudioWhenComputerAudioSourceIsSelected() {
+        let vm = TranscriptionViewModel()
+        vm.engineStatus = .ready("ready")
+        vm.microphoneReady = true
+        vm.micDeviceName = "MacBook Pro 麦克风"
+        vm.selectAudioCaptureSource(.systemAudio)
+        vm.systemAudioReady = false
+        vm.sherpaReady = true
+        vm.whisperReady = true
+
+        XCTAssertTrue(vm.microphoneReady)
+        XCTAssertFalse(vm.systemAudioReady)
+        XCTAssertEqual(vm.audioCaptureSourceStatus, "麦克风已通过；电脑音频待自检")
+        XCTAssertFalse(vm.canStartTranscription)
+
+        vm.systemAudioReady = true
+
+        XCTAssertTrue(vm.canStartTranscription)
+        vm.selectAudioCaptureSource(.microphone)
+        XCTAssertTrue(vm.microphoneReady)
+        XCTAssertFalse(vm.systemAudioReady)
+        XCTAssertTrue(vm.canStartTranscription)
+    }
+
+    func testApplicationAudioStorageDowngradesToSystemAudio() {
+        let source = AudioCaptureSource.application(
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        )
+        let decoded = AudioCaptureSource.fromStorageValue(source.storageValue)
+
+        XCTAssertEqual(decoded, .systemAudio)
+        XCTAssertEqual(AudioCaptureSource.fromStorageValue("not-json"), .microphone)
+        XCTAssertEqual(AudioCaptureSource.systemAudio.statusTitle, "全系统音频 + 麦克风")
+    }
+
+    @MainActor
+    func testAudioSourceListDoesNotExposeApplicationAudioSources() {
+        let vm = TranscriptionViewModel()
+
+        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
+
+        vm.refreshAudioCaptureSources()
+
+        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
+
+        vm.selectAudioCaptureSource(.application(
+            bundleIdentifier: "com.microsoft.teams2",
+            name: "Microsoft Teams"
+        ))
+
+        XCTAssertEqual(vm.selectedAudioCaptureSource, .systemAudio)
+        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
+    }
+
+    @MainActor
+    func testSavedApplicationAudioSourceDowngradesToSystemAudio() {
+        let legacySource = AudioCaptureSource.application(
+            bundleIdentifier: "com.apple.WindowManager",
+            name: "Window Manager"
+        )
+        UserDefaults.standard.set(legacySource.storageValue, forKey: "audioCaptureSource")
+
+        let vm = TranscriptionViewModel()
+
+        XCTAssertEqual(vm.selectedAudioCaptureSource, .systemAudio)
+        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
+        XCTAssertEqual(vm.audioCaptureSourceStatus, "已切换为全系统音频，避免应用捕获授权冲突")
+        XCTAssertEqual(
+            UserDefaults.standard.string(forKey: "audioCaptureSource"),
+            AudioCaptureSource.systemAudio.storageValue
+        )
+    }
+
+    func testSystemAudioEngineDoesNotExposeApplicationAudioSources() async {
+        let sources = await SystemAudioCaptureEngine.availableApplicationSources()
+
+        XCTAssertTrue(sources.isEmpty)
+    }
+
+    func testSystemAudioPermissionMessageDoesNotMentionMicrophonePermission() {
+        let error = NSError(
+            domain: "SystemAudioCaptureEngine",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "TCC denied"]
+        )
+
+        let message = SystemAudioCaptureEngine.permissionMessage(for: .systemAudio, error: error)
+
+        XCTAssertTrue(message.contains("屏幕与系统音频录制"))
+        XCTAssertTrue(message.contains("仅系统录音"))
+        XCTAssertTrue(message.contains("电脑音频未授权"))
+        XCTAssertFalse(message.contains("麦克风权限未授权"))
+    }
+
+    func testGeneratedInfoPlistsDeclareMicrophoneAndSystemAudioUsage() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let scriptPaths = [
+            packageRoot.appendingPathComponent("script/build_and_run.sh"),
+            packageRoot.appendingPathComponent("script/package_dmg.sh")
+        ]
+
+        for scriptPath in scriptPaths {
+            let script = try String(contentsOf: scriptPath, encoding: .utf8)
+            XCTAssertTrue(script.contains("NSMicrophoneUsageDescription"))
+            XCTAssertTrue(script.contains("NSScreenCaptureUsageDescription"))
+            XCTAssertTrue(script.contains("NSAudioCaptureUsageDescription"))
+            XCTAssertTrue(script.contains("record your local speech"))
+            XCTAssertTrue(script.contains("screen and system audio recording access"))
+        }
+    }
+
+    @MainActor
     func testFormattedResultEntersOrganizingBeforeTranslation() {
         let vm = TranscriptionViewModel()
         let uid = UUID()
@@ -914,10 +1095,11 @@ final class HySimulatranslateTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(vm.historyItems.count, 5)
+        XCTAssertEqual(vm.historyItems.count, 6)
         XCTAssertTrue(vm.historyItems.allSatisfy(\.isSystemMessage))
         XCTAssertEqual(vm.historyItems.map(\.english), [
             "[自检] 麦克风: 通过",
+            "[自检] 音频源: 麦克风: 通过",
             "[自检] Sherpa: 通过",
             "[自检] WhisperKit large-v3: 通过",
             "[自检] Groq / llama-3.3-70b-versatile: 通过",
@@ -1127,6 +1309,7 @@ final class HySimulatranslateTests: XCTestCase {
             provider: LLMProviderCatalog.groqCoreProvider!,
             status: .passed
         )
+        vm.selectAudioCaptureSource(.microphone)
         vm.engineStatus = .ready("ready")
         vm.microphoneReady = true
         vm.sherpaReady = true

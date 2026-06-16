@@ -33,6 +33,7 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("ScreenCaptureKit"),
             ]
         ),
         .testTarget(

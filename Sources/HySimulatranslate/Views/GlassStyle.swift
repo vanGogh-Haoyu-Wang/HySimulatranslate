@@ -26,21 +26,28 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
 }
 
 struct GlassWindowConfigurator: NSViewRepresentable {
+    @Binding var isFullScreen: Bool
+    private let trafficLightCenterInset: CGFloat = 21
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isFullScreen: $isFullScreen)
+    }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
-            configureWindow(from: view)
+            configureWindow(from: view, context: context)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            configureWindow(from: nsView)
+            configureWindow(from: nsView, context: context)
         }
     }
 
-    private func configureWindow(from view: NSView) {
+    private func configureWindow(from view: NSView, context: Context) {
         guard let window = view.window else { return }
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -48,6 +55,8 @@ struct GlassWindowConfigurator: NSViewRepresentable {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.toolbar = nil
+        context.coordinator.attach(to: window)
+        context.coordinator.updateFullScreenState(from: window)
         alignTrafficLightButtons(in: window)
     }
 
@@ -60,20 +69,72 @@ struct GlassWindowConfigurator: NSViewRepresentable {
 
         guard let container = buttons.first?.superview else { return }
 
-        let leftInset: CGFloat = 16
-        let topInset: CGFloat = 16
-        let currentLeading = buttons.map(\.frame.minX).min() ?? leftInset
-        let horizontalShift = leftInset - currentLeading
+        guard let redButton = buttons.min(by: { $0.frame.midX < $1.frame.midX }) else { return }
+        let horizontalShift = trafficLightCenterInset - redButton.frame.midX
 
         for button in buttons {
             var frame = button.frame
             frame.origin.x += horizontalShift
             if container.isFlipped {
-                frame.origin.y = topInset
+                frame.origin.y = max(0, trafficLightCenterInset - frame.height / 2)
             } else {
-                frame.origin.y = max(0, container.bounds.height - frame.height - topInset)
+                frame.origin.y = max(0, container.bounds.height - trafficLightCenterInset - frame.height / 2)
             }
             button.frame = frame
+        }
+    }
+
+    final class Coordinator {
+        private var isFullScreen: Binding<Bool>
+        private weak var observedWindow: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+
+        init(isFullScreen: Binding<Bool>) {
+            self.isFullScreen = isFullScreen
+        }
+
+        deinit {
+            removeObservers()
+        }
+
+        func attach(to window: NSWindow) {
+            guard observedWindow !== window else { return }
+            removeObservers()
+            observedWindow = window
+
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(
+                    forName: NSWindow.didEnterFullScreenNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] notification in
+                    guard let window = notification.object as? NSWindow else { return }
+                    self?.updateFullScreenState(from: window)
+                },
+                center.addObserver(
+                    forName: NSWindow.didExitFullScreenNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] notification in
+                    guard let window = notification.object as? NSWindow else { return }
+                    self?.updateFullScreenState(from: window)
+                }
+            ]
+        }
+
+        func updateFullScreenState(from window: NSWindow) {
+            let newValue = window.styleMask.contains(.fullScreen)
+            if isFullScreen.wrappedValue != newValue {
+                isFullScreen.wrappedValue = newValue
+            }
+        }
+
+        private func removeObservers() {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            observers.removeAll()
         }
     }
 }

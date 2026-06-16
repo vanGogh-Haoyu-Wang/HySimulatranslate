@@ -12,15 +12,17 @@ struct ContentView: View {
     @State private var providerAPIKeys: [LLMProviderID: String] = [:]
     @State private var selectedCourseIndex: Int = 0
     @State private var didInitializeWorkspace = false
+    @State private var isWindowFullScreen = false
 
     var body: some View {
         TranscriptionView(
             vm: vm,
             courseDB: courseDB,
             providerAPIKeys: $providerAPIKeys,
-            selectedCourseIndex: $selectedCourseIndex
+            selectedCourseIndex: $selectedCourseIndex,
+            isWindowFullScreen: isWindowFullScreen
         )
-        .background(GlassWindowConfigurator())
+        .background(GlassWindowConfigurator(isFullScreen: $isWindowFullScreen))
         .ignoresSafeArea(.container, edges: .top)
         .onAppear {
             applyAppearance(appearanceMode)
