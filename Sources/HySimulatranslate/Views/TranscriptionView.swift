@@ -30,6 +30,7 @@ struct TranscriptionView: View {
     private let titlebarControlsTopPadding: CGFloat = 10
     private let titlebarControlSize: CGFloat = 22
     private let centerWallTextSize: CGFloat = 13
+    private let dynamicControlButtonDiameter: CGFloat = 28
     private let unBlue = Color(red: 0.255, green: 0.561, blue: 0.871)
     private let draftBlue = Color(red: 0.0, green: 0.478, blue: 1.0)
 
@@ -848,7 +849,7 @@ struct TranscriptionView: View {
                 controlStrip
             }
             .padding(.horizontal, 10)
-            .padding(.bottom, 4)
+            .padding(.bottom, 10)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 154)
@@ -937,9 +938,9 @@ struct TranscriptionView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
+                .frame(width: dynamicControlButtonDiameter, height: dynamicControlButtonDiameter)
                 .background(Circle().fill(tint))
                 .contentShape(Circle())
         }
