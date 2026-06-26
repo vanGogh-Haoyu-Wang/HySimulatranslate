@@ -6,6 +6,7 @@ final class HySimulatranslateTests: XCTestCase {
 
     override func setUpWithError() throws {
         UserDefaults.standard.removeObject(forKey: "audioCaptureSource")
+        UserDefaults.standard.removeObject(forKey: "audioInputSelection")
         try super.setUpWithError()
     }
 
@@ -15,6 +16,7 @@ final class HySimulatranslateTests: XCTestCase {
         }
         temporaryDirectories.removeAll()
         UserDefaults.standard.removeObject(forKey: "audioCaptureSource")
+        UserDefaults.standard.removeObject(forKey: "audioInputSelection")
         try super.tearDownWithError()
     }
 
@@ -491,6 +493,51 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertNil(AgnesHistoryOrganizerService.validatedUpdates(from: expanded, originalItems: items))
     }
 
+    func testAgnesTranslationOnlyValidationRejectsMissingDuplicateAndCrossSpeakerIDs() {
+        let items = [
+            AgnesTranslationOnlyItem(id: "a", speakerID: "A", chinese: "第一段来自 A。"),
+            AgnesTranslationOnlyItem(id: "b", speakerID: "A", chinese: "第二段仍然来自 A。"),
+            AgnesTranslationOnlyItem(id: "c", speakerID: "B", chinese: "第三段来自 B。")
+        ]
+        let valid = """
+        {"paragraphs":[
+          {"id":"a+b","speakerID":"A","text":"第一段来自 A。第二段仍然来自 A。","sourceIDs":["a","b"]},
+          {"id":"c","speakerID":"B","text":"第三段来自 B。","sourceIDs":["c"]}
+        ]}
+        """
+        let missing = """
+        {"paragraphs":[
+          {"id":"a","speakerID":"A","text":"第一段来自 A。","sourceIDs":["a"]},
+          {"id":"c","speakerID":"B","text":"第三段来自 B。","sourceIDs":["c"]}
+        ]}
+        """
+        let duplicate = """
+        {"paragraphs":[
+          {"id":"a","speakerID":"A","text":"第一段来自 A。","sourceIDs":["a"]},
+          {"id":"again-a","speakerID":"A","text":"第一段来自 A。","sourceIDs":["a"]},
+          {"id":"b+c","speakerID":"A","text":"第二段仍然来自 A。第三段来自 B。","sourceIDs":["b","c"]}
+        ]}
+        """
+        let crossSpeaker = """
+        {"paragraphs":[
+          {"id":"a+c","speakerID":"A","text":"第一段来自 A。第三段来自 B。","sourceIDs":["a","c"]},
+          {"id":"b","speakerID":"A","text":"第二段仍然来自 A。","sourceIDs":["b"]}
+        ]}
+        """
+        let expanded = """
+        {"paragraphs":[
+          {"id":"a+b","speakerID":"A","text":"第一段来自 A。第二段仍然来自 A。这里额外补充了大量原文没有提到的背景、计划、数字、风险、后续行动和结论，用来测试扩写过滤。","sourceIDs":["a","b"]},
+          {"id":"c","speakerID":"B","text":"第三段来自 B。","sourceIDs":["c"]}
+        ]}
+        """
+
+        XCTAssertEqual(AgnesHistoryOrganizerService.validatedTranslationOnlyBlocks(from: valid, originalItems: items)?.count, 2)
+        XCTAssertNil(AgnesHistoryOrganizerService.validatedTranslationOnlyBlocks(from: missing, originalItems: items))
+        XCTAssertNil(AgnesHistoryOrganizerService.validatedTranslationOnlyBlocks(from: duplicate, originalItems: items))
+        XCTAssertNil(AgnesHistoryOrganizerService.validatedTranslationOnlyBlocks(from: crossSpeaker, originalItems: items))
+        XCTAssertNil(AgnesHistoryOrganizerService.validatedTranslationOnlyBlocks(from: expanded, originalItems: items))
+    }
+
     func testHistoryWallCleanerDropsDuplicatesAndTrimsAdjacentBoundaryOverlap() {
         let first = TranscriptionItem(
             english: "The product roadmap is clear customer support workflow automation",
@@ -740,6 +787,130 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(block.canInterleaveLineByLine)
     }
 
+    func testHistoryDisplayModeDefaultsToBilingual() {
+        XCTAssertEqual(HistoryDisplayMode.defaultMode, .bilingual)
+        XCTAssertEqual(HistoryDisplayMode.bilingual.title, "原文+译文")
+        XCTAssertEqual(HistoryDisplayMode.translationOnly.title, "仅译文")
+    }
+
+    func testTranslationOnlyHistoryBlocksMergeSameSpeakerAndSplitOnSpeakerChange() {
+        let items = [
+            TranscriptionItem(
+                english: "First A sentence.",
+                chinese: "第一句来自 A。",
+                status: .done,
+                zone: .history,
+                speakerID: "A"
+            ),
+            TranscriptionItem(
+                english: "Second A sentence.",
+                chinese: "第二句仍然来自 A。",
+                status: .done,
+                zone: .history,
+                speakerID: "A"
+            ),
+            TranscriptionItem(
+                english: "First B sentence.",
+                chinese: "第三句来自 B。",
+                status: .done,
+                zone: .history,
+                speakerID: "B"
+            ),
+            TranscriptionItem(
+                english: "Pending translation.",
+                status: .done,
+                zone: .history,
+                speakerID: "B"
+            )
+        ]
+
+        let blocks = TranslationOnlyHistoryBuilder.blocks(from: items)
+
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(blocks[0].speakerID, "A")
+        XCTAssertEqual(blocks[0].speakerDisplayName, "发言者 A")
+        XCTAssertEqual(blocks[0].text, "第一句来自 A。第二句仍然来自 A。")
+        XCTAssertEqual(blocks[0].sourceIDs.count, 2)
+        XCTAssertEqual(blocks[1].speakerID, "B")
+        XCTAssertEqual(blocks[1].text, "第三句来自 B。")
+        XCTAssertEqual(blocks[1].sourceIDs.count, 1)
+    }
+
+    func testTranslationOnlyHistoryKeepsSystemMessagesSeparateAndSkipsUntranslatedItems() {
+        let system = TranscriptionItem(
+            english: "[自检] SpeakerKit: 未通过",
+            status: .done,
+            zone: .history,
+            isSystemMessage: true
+        )
+        let untranslated = TranscriptionItem(
+            english: "This does not have translation yet.",
+            status: .done,
+            zone: .history,
+            speakerID: "A"
+        )
+
+        XCTAssertEqual(TranslationOnlyHistoryBuilder.systemMessages(from: [system, untranslated]).map(\.english), [system.english])
+        XCTAssertTrue(TranslationOnlyHistoryBuilder.blocks(from: [system, untranslated]).isEmpty)
+    }
+
+    func testSessionNoteRendererKeepsBilingualContentWhenItemsHaveSpeakerIDs() {
+        let course = CourseSubject(name: "默认", abbrev: "Default", keywords: "", meetingFocus: "")
+        let content = SessionNoteRenderer.render(
+            course: course,
+            translationEnabled: true,
+            items: [
+                TranscriptionItem(
+                    english: "Speaker labels are display-only.",
+                    chinese: "说话人标签只用于显示。",
+                    status: .done,
+                    zone: .history,
+                    speakerID: "A"
+                )
+            ],
+            finalSummary: "本次讨论确认标签不改变笔记格式。",
+            date: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertTrue(content.contains("Speaker labels are display-only.\n说话人标签只用于显示。"))
+        XCTAssertFalse(content.contains("发言者 A"))
+    }
+
+    func testSpeakerLabelMapperKeepsStableLabelsAcrossRollingDiarizationRuns() {
+        let firstID = UUID()
+        let secondID = UUID()
+        let thirdID = UUID()
+        let spans = [
+            SpeakerAudioSpan(itemID: firstID, startSample: 0, endSample: 16000),
+            SpeakerAudioSpan(itemID: secondID, startSample: 16000, endSample: 32000)
+        ]
+        var mapper = SpeakerLabelMapper()
+
+        var labels = mapper.assignLabels(
+            for: spans,
+            diarizationSegments: [
+                SpeakerDiarizationSegment(rawSpeakerID: "speaker_0", startSample: 0, endSample: 16000),
+                SpeakerDiarizationSegment(rawSpeakerID: "speaker_1", startSample: 16000, endSample: 32000)
+            ]
+        )
+
+        XCTAssertEqual(labels[firstID], "A")
+        XCTAssertEqual(labels[secondID], "B")
+
+        labels = mapper.assignLabels(
+            for: spans + [SpeakerAudioSpan(itemID: thirdID, startSample: 32000, endSample: 48000)],
+            diarizationSegments: [
+                SpeakerDiarizationSegment(rawSpeakerID: "rerun_7", startSample: 0, endSample: 16000),
+                SpeakerDiarizationSegment(rawSpeakerID: "rerun_3", startSample: 16000, endSample: 32000),
+                SpeakerDiarizationSegment(rawSpeakerID: "rerun_9", startSample: 32000, endSample: 48000)
+            ]
+        )
+
+        XCTAssertEqual(labels[firstID], "A")
+        XCTAssertEqual(labels[secondID], "B")
+        XCTAssertEqual(labels[thirdID], "C")
+    }
+
     func testLiveSummaryPromptRequiresChineseOnlyAndNoInventedContent() {
         let prompt = LiveSummaryPrompt.make(
             previousSummary: "前面讨论了实验目标。",
@@ -917,63 +1088,75 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testStartGateRequiresSystemAudioWhenComputerAudioSourceIsSelected() {
+    func testAudioInputSelectionDefaultsToMicrophoneOnlyAndRequiresOneEnabledInput() {
+        let selection = AudioInputSelection.defaultSelection
+
+        XCTAssertTrue(selection.microphoneEnabled)
+        XCTAssertFalse(selection.systemAudioEnabled)
+        XCTAssertTrue(selection.hasEnabledInput)
+
+        XCTAssertFalse(AudioInputSelection(microphoneEnabled: false, systemAudioEnabled: false).hasEnabledInput)
+    }
+
+    @MainActor
+    func testStartGateSupportsMicrophoneOnlySystemOnlyAndCombinedInputs() {
         let vm = TranscriptionViewModel()
         vm.engineStatus = .ready("ready")
-        vm.microphoneReady = true
-        vm.micDeviceName = "MacBook Pro 麦克风"
-        vm.selectAudioCaptureSource(.systemAudio)
-        vm.systemAudioReady = false
         vm.sherpaReady = true
         vm.whisperReady = true
 
-        XCTAssertTrue(vm.microphoneReady)
-        XCTAssertFalse(vm.systemAudioReady)
-        XCTAssertEqual(vm.audioCaptureSourceStatus, "麦克风已通过；电脑音频待自检")
+        vm.setMicrophoneInputEnabled(true)
+        vm.setSystemAudioInputEnabled(false)
+        vm.microphoneReady = true
+        vm.systemAudioReady = false
+        XCTAssertTrue(vm.canStartTranscription)
+
+        vm.setMicrophoneInputEnabled(false)
+        vm.setSystemAudioInputEnabled(true)
+        vm.microphoneReady = false
+        vm.systemAudioReady = true
+        XCTAssertTrue(vm.canStartTranscription)
+
+        vm.setMicrophoneInputEnabled(true)
+        vm.setSystemAudioInputEnabled(true)
+        vm.microphoneReady = true
+        vm.systemAudioReady = false
         XCTAssertFalse(vm.canStartTranscription)
 
         vm.systemAudioReady = true
+        XCTAssertTrue(vm.canStartTranscription)
 
-        XCTAssertTrue(vm.canStartTranscription)
-        vm.selectAudioCaptureSource(.microphone)
-        XCTAssertTrue(vm.microphoneReady)
-        XCTAssertFalse(vm.systemAudioReady)
-        XCTAssertTrue(vm.canStartTranscription)
+        vm.setMicrophoneInputEnabled(false)
+        vm.setSystemAudioInputEnabled(false)
+        XCTAssertFalse(vm.audioInputSelection.hasEnabledInput)
+        XCTAssertFalse(vm.canStartTranscription)
     }
 
-    func testApplicationAudioStorageDowngradesToSystemAudio() {
-        let source = AudioCaptureSource.application(
+    func testAudioInputSelectionMigratesLegacyAudioCaptureSourceStorage() {
+        XCTAssertEqual(
+            AudioInputSelection.fromStorageValue(nil, legacyAudioCaptureSourceStorage: nil),
+            .defaultSelection
+        )
+        XCTAssertEqual(
+            AudioInputSelection.fromStorageValue(nil, legacyAudioCaptureSourceStorage: AudioCaptureSource.microphone.storageValue),
+            AudioInputSelection(microphoneEnabled: true, systemAudioEnabled: false)
+        )
+        XCTAssertEqual(
+            AudioInputSelection.fromStorageValue(nil, legacyAudioCaptureSourceStorage: AudioCaptureSource.systemAudio.storageValue),
+            AudioInputSelection(microphoneEnabled: true, systemAudioEnabled: true)
+        )
+        let legacyApplicationAudio = AudioCaptureSource.application(
             bundleIdentifier: "com.microsoft.teams2",
             name: "Microsoft Teams"
         )
-        let decoded = AudioCaptureSource.fromStorageValue(source.storageValue)
-
-        XCTAssertEqual(decoded, .systemAudio)
-        XCTAssertEqual(AudioCaptureSource.fromStorageValue("not-json"), .microphone)
-        XCTAssertEqual(AudioCaptureSource.systemAudio.statusTitle, "全系统音频 + 麦克风")
+        XCTAssertEqual(
+            AudioInputSelection.fromStorageValue(nil, legacyAudioCaptureSourceStorage: legacyApplicationAudio.storageValue),
+            AudioInputSelection(microphoneEnabled: true, systemAudioEnabled: true)
+        )
     }
 
     @MainActor
-    func testAudioSourceListDoesNotExposeApplicationAudioSources() {
-        let vm = TranscriptionViewModel()
-
-        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
-
-        vm.refreshAudioCaptureSources()
-
-        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
-
-        vm.selectAudioCaptureSource(.application(
-            bundleIdentifier: "com.microsoft.teams2",
-            name: "Microsoft Teams"
-        ))
-
-        XCTAssertEqual(vm.selectedAudioCaptureSource, .systemAudio)
-        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
-    }
-
-    @MainActor
-    func testSavedApplicationAudioSourceDowngradesToSystemAudio() {
+    func testSavedApplicationAudioSourceMigratesToCombinedInputSelection() {
         let legacySource = AudioCaptureSource.application(
             bundleIdentifier: "com.apple.WindowManager",
             name: "Window Manager"
@@ -982,13 +1165,119 @@ final class HySimulatranslateTests: XCTestCase {
 
         let vm = TranscriptionViewModel()
 
-        XCTAssertEqual(vm.selectedAudioCaptureSource, .systemAudio)
-        XCTAssertEqual(vm.availableAudioCaptureSources, [.microphone, .systemAudio])
-        XCTAssertEqual(vm.audioCaptureSourceStatus, "已切换为全系统音频，避免应用捕获授权冲突")
+        XCTAssertEqual(vm.audioInputSelection, AudioInputSelection(microphoneEnabled: true, systemAudioEnabled: true))
+        XCTAssertEqual(vm.audioCaptureSourceStatus, "已切换为麦克风 + 电脑音频，避免应用捕获授权冲突")
         XCTAssertEqual(
-            UserDefaults.standard.string(forKey: "audioCaptureSource"),
-            AudioCaptureSource.systemAudio.storageValue
+            UserDefaults.standard.string(forKey: "audioInputSelection"),
+            AudioInputSelection(microphoneEnabled: true, systemAudioEnabled: true).storageValue
         )
+    }
+
+    @MainActor
+    func testAudioInputTogglesResetOnlyTheirOwnReadiness() {
+        let vm = TranscriptionViewModel()
+        vm.microphoneReady = true
+        vm.systemAudioReady = true
+
+        vm.setMicrophoneInputEnabled(false)
+        XCTAssertFalse(vm.microphoneReady)
+        XCTAssertTrue(vm.systemAudioReady)
+
+        vm.setSystemAudioInputEnabled(false)
+        XCTAssertFalse(vm.systemAudioReady)
+    }
+
+    @MainActor
+    func testSelfCheckSummaryIncludesOnlyEnabledInputs() {
+        let vm = TranscriptionViewModel()
+        vm.setMicrophoneInputEnabled(false)
+        vm.setSystemAudioInputEnabled(true)
+
+        vm.publishSelfCheckSummary(
+            microphone: false,
+            audioSourceReady: true,
+            sherpa: true,
+            whisper: true,
+            providerResults: []
+        )
+
+        XCTAssertEqual(vm.historyItems.map(\.english), [
+            "[自检] 电脑音频: 通过",
+            "[自检] Sherpa: 通过",
+            "[自检] WhisperKit large-v3: 通过"
+        ])
+    }
+
+    @MainActor
+    func testAudioInputChangeRequiresOnlyAudioCheckAndPreservesModelReadiness() {
+        let vm = TranscriptionViewModel()
+        let providerResult = LLMProviderCheckResult(
+            provider: LLMProviderCatalog.groqCoreProvider!,
+            status: .passed
+        )
+        vm.engineStatus = .ready("ready")
+        vm.microphoneReady = true
+        vm.systemAudioReady = false
+        vm.sherpaReady = true
+        vm.whisperReady = true
+        vm.speakerKitReady = true
+        vm.apiReady = true
+        vm.translationEnabled = true
+        vm.liveSummaryReady = true
+        vm.providerCheckResults = [providerResult]
+        vm.fullSelfCheckRequired = false
+        vm.audioInputCheckRequired = false
+
+        vm.setSystemAudioInputEnabled(true)
+
+        XCTAssertTrue(vm.audioInputCheckRequired)
+        XCTAssertFalse(vm.fullSelfCheckRequired)
+        XCTAssertTrue(vm.microphoneReady)
+        XCTAssertFalse(vm.systemAudioReady)
+        XCTAssertTrue(vm.sherpaReady)
+        XCTAssertTrue(vm.whisperReady)
+        XCTAssertTrue(vm.speakerKitReady)
+        XCTAssertTrue(vm.apiReady)
+        XCTAssertTrue(vm.translationEnabled)
+        XCTAssertTrue(vm.liveSummaryReady)
+        XCTAssertEqual(vm.providerCheckResults, [providerResult])
+        XCTAssertEqual(vm.nextSelfCheckScope, .audioInput)
+    }
+
+    @MainActor
+    func testProviderModelChangeForcesFullSelfCheck() {
+        let vm = TranscriptionViewModel()
+        vm.engineStatus = .ready("ready")
+        vm.microphoneReady = true
+        vm.sherpaReady = true
+        vm.whisperReady = true
+        vm.fullSelfCheckRequired = false
+        vm.audioInputCheckRequired = false
+
+        vm.noteProviderModelSelectionChanged()
+
+        XCTAssertTrue(vm.fullSelfCheckRequired)
+        XCTAssertFalse(vm.audioInputCheckRequired)
+        XCTAssertEqual(vm.nextSelfCheckScope, .full)
+    }
+
+    @MainActor
+    func testClosingFailedSystemAudioInputRestoresStartGateWhenMicrophoneIsReady() {
+        let vm = TranscriptionViewModel()
+        vm.engineStatus = .ready("ready")
+        vm.sherpaReady = true
+        vm.whisperReady = true
+        vm.microphoneReady = true
+        vm.fullSelfCheckRequired = false
+        vm.audioInputCheckRequired = false
+
+        vm.setSystemAudioInputEnabled(true)
+        XCTAssertFalse(vm.canStartTranscription)
+        XCTAssertTrue(vm.audioInputCheckRequired)
+
+        vm.setSystemAudioInputEnabled(false)
+        XCTAssertTrue(vm.canStartTranscription)
+        XCTAssertFalse(vm.audioInputCheckRequired)
     }
 
     func testSystemAudioEngineDoesNotExposeApplicationAudioSources() async {
@@ -1095,11 +1384,10 @@ final class HySimulatranslateTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(vm.historyItems.count, 6)
+        XCTAssertEqual(vm.historyItems.count, 5)
         XCTAssertTrue(vm.historyItems.allSatisfy(\.isSystemMessage))
         XCTAssertEqual(vm.historyItems.map(\.english), [
             "[自检] 麦克风: 通过",
-            "[自检] 音频源: 麦克风: 通过",
             "[自检] Sherpa: 通过",
             "[自检] WhisperKit large-v3: 通过",
             "[自检] Groq / llama-3.3-70b-versatile: 通过",

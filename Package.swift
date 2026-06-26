@@ -21,6 +21,7 @@ let package = Package(
             dependencies: [
                 "CSherpaOnnx",
                 .product(name: "WhisperKit", package: "WhisperKit"),
+                .product(name: "SpeakerKit", package: "WhisperKit"),
             ],
             path: "Sources/HySimulatranslate",
             linkerSettings: [

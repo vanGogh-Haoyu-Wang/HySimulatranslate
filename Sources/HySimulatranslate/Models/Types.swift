@@ -47,6 +47,22 @@ enum WorkspaceMode: Equatable {
     case settings
 }
 
+enum HistoryDisplayMode: String, CaseIterable, Identifiable {
+    case bilingual
+    case translationOnly
+
+    static let defaultMode: HistoryDisplayMode = .bilingual
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .bilingual: "原文+译文"
+        case .translationOnly: "仅译文"
+        }
+    }
+}
+
 // MARK: - 同传条目
 struct TranscriptionItem: Identifiable, Equatable {
     let id: UUID
@@ -59,6 +75,11 @@ struct TranscriptionItem: Identifiable, Equatable {
     var doneTime: TimeInterval
     var addedToHistory: Bool
     var isSystemMessage: Bool
+    var speakerID: String?
+
+    var speakerDisplayName: String {
+        SpeakerDisplayName.displayName(for: speakerID)
+    }
 
     init(
         id: UUID = UUID(),
@@ -69,7 +90,8 @@ struct TranscriptionItem: Identifiable, Equatable {
         isAggregated: Bool = false,
         zone: ItemZone = .dynamic,
         doneTime: TimeInterval = 0,
-        isSystemMessage: Bool = false
+        isSystemMessage: Bool = false,
+        speakerID: String? = nil
     ) {
         self.id = id
         self.english = english
@@ -81,6 +103,7 @@ struct TranscriptionItem: Identifiable, Equatable {
         self.doneTime = doneTime
         self.addedToHistory = false
         self.isSystemMessage = isSystemMessage
+        self.speakerID = speakerID
     }
 
     static func == (lhs: TranscriptionItem, rhs: TranscriptionItem) -> Bool {

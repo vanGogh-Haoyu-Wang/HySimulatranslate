@@ -438,7 +438,8 @@ struct TranscriptionView: View {
                 Spacer(minLength: 16)
 
                 HStack(spacing: 6) {
-                    audioCaptureSourceMenu
+                    historyDisplayModeButton
+                    audioInputToggleRail
                     Divider()
                         .frame(height: 14)
                     Text("W\(vm.whisperQueueSize) / L\(vm.llmQueueSize)")
@@ -488,47 +489,107 @@ struct TranscriptionView: View {
         }
     }
 
-    private var audioCaptureSourceMenu: some View {
-        Menu {
-            ForEach(vm.availableAudioCaptureSources) { source in
-                Button {
-                    vm.selectAudioCaptureSource(source)
-                } label: {
-                    Label(audioSourceMenuTitle(for: source), systemImage: source.systemImage)
+    private var audioInputToggleRail: some View {
+        HStack(spacing: 4) {
+            audioInputToggleButton(.microphone)
+            audioInputToggleButton(.systemAudio)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func audioInputToggleButton(_ kind: AudioInputToggleKind) -> some View {
+        let isEnabled: Bool = {
+            switch kind {
+            case .microphone:
+                return vm.audioInputSelection.microphoneEnabled
+            case .systemAudio:
+                return vm.audioInputSelection.systemAudioEnabled
+            }
+        }()
+        let isReady: Bool = {
+            switch kind {
+            case .microphone:
+                return vm.microphoneReady
+            case .systemAudio:
+                return vm.systemAudioReady
+            }
+        }()
+        let controlDisabled = vm.isRecording || vm.isFinalizingSession || isChecking
+        let symbolName = kind.symbolName(isEnabled: isEnabled)
+        let foregroundColor = audioInputToggleForeground(isEnabled: isEnabled, isReady: isReady)
+        let backgroundColor = audioInputToggleBackground(isEnabled: isEnabled, isReady: isReady)
+
+        return Button {
+            withAnimation(.snappy) {
+                switch kind {
+                case .microphone:
+                    vm.setMicrophoneInputEnabled(!isEnabled)
+                case .systemAudio:
+                    vm.setSystemAudioInputEnabled(!isEnabled)
                 }
             }
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: vm.selectedAudioCaptureSource.systemImage)
-                Text(selectedAudioSourceTitle)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
+            Image(systemName: symbolName)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 24, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(foregroundColor)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(backgroundColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(audioInputToggleBorder(isEnabled: isEnabled, isReady: isReady), lineWidth: 1)
+        )
+        .opacity(controlDisabled ? 0.55 : 1.0)
+        .disabled(controlDisabled)
+        .help(audioInputToggleHelp(kind, isEnabled: isEnabled, isReady: isReady, isDisabled: controlDisabled))
+    }
+
+    private var historyDisplayModeButton: some View {
+        Button {
+            let next: HistoryDisplayMode = vm.historyDisplayMode == .bilingual ? .translationOnly : .bilingual
+            withAnimation(.snappy) {
+                vm.historyDisplayMode = next
             }
-            .contentShape(Rectangle())
+        } label: {
+            Text(vm.historyDisplayMode.title)
+                .font(centerWallFont(weight: .semibold))
+                .lineLimit(1)
+                .frame(minWidth: 58)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize(horizontal: true, vertical: false)
-        .disabled(vm.isRecording || vm.isFinalizingSession || isChecking)
-        .help("选择音频来源。电脑音频模式会同时收录麦克风，建议戴耳机避免外放重复。")
+        .buttonStyle(.plain)
+        .foregroundStyle(vm.historyDisplayMode == .translationOnly ? unBlue : .secondary)
+        .help(vm.historyDisplayMode == .translationOnly ? "切换为原文+译文历史墙" : "切换为仅译文历史墙")
     }
 
-    private var selectedAudioSourceTitle: String {
-        if vm.selectedAudioCaptureSource.kind == .microphone {
-            let name = vm.micDeviceName.isEmpty ? "麦克风" : vm.micDeviceName
-            return "\(name) · \(vm.microphoneReady ? "已授权" : "待授权")"
-        }
-        return "\(vm.selectedAudioCaptureSource.statusTitle) · \(vm.systemAudioReady ? "已授权" : "待授权")"
+    private func audioInputToggleForeground(isEnabled: Bool, isReady: Bool) -> Color {
+        guard isEnabled else { return .secondary.opacity(0.62) }
+        return isReady ? unBlue : .orange
     }
 
-    private func audioSourceMenuTitle(for source: AudioCaptureSource) -> String {
-        if source.kind == .microphone {
-            let name = vm.micDeviceName.isEmpty ? "麦克风" : vm.micDeviceName
-            return "\(name) · \(vm.microphoneReady ? "已授权" : "待授权")"
-        }
-        return "\(source.menuTitle) · \(vm.systemAudioReady && source == vm.selectedAudioCaptureSource ? "已授权" : "待授权")"
+    private func audioInputToggleBackground(isEnabled: Bool, isReady: Bool) -> Color {
+        guard isEnabled else { return .clear }
+        return isReady ? unBlue.opacity(0.14) : Color.orange.opacity(0.14)
+    }
+
+    private func audioInputToggleBorder(isEnabled: Bool, isReady: Bool) -> Color {
+        guard isEnabled else { return .secondary.opacity(0.20) }
+        return isReady ? unBlue.opacity(0.48) : Color.orange.opacity(0.46)
+    }
+
+    private func audioInputToggleHelp(
+        _ kind: AudioInputToggleKind,
+        isEnabled: Bool,
+        isReady: Bool,
+        isDisabled: Bool
+    ) -> String {
+        let state = isEnabled ? (isReady ? "已授权" : "待自检") : "已关闭"
+        let lock = isDisabled ? "；录音、整理或自检中不可切换" : ""
+        return "\(kind.title)：\(state)\(lock)"
     }
 
     private var mainContentRow: some View {
@@ -738,8 +799,10 @@ struct TranscriptionView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     let visibleItems = vm.historyItems.filter { $0.isVisible && $0.status == .done }
+                    let systemItems = TranslationOnlyHistoryBuilder.systemMessages(from: visibleItems)
+                    let translationOnlyBlocks = vm.translationOnlyHistoryBlocks
 
-                    if visibleItems.isEmpty {
+                    if visibleItems.isEmpty || (vm.historyDisplayMode == .translationOnly && systemItems.isEmpty && translationOnlyBlocks.isEmpty) {
                         Text("暂无历史内容")
                             .font(centerWallFont())
                             .foregroundStyle(.secondary)
@@ -747,8 +810,17 @@ struct TranscriptionView: View {
                             .padding(.vertical, 18)
                     }
 
-                    ForEach(visibleItems) { item in
-                        historyItemView(item)
+                    if vm.historyDisplayMode == .translationOnly {
+                        ForEach(systemItems) { item in
+                            historyItemView(item)
+                        }
+                        ForEach(translationOnlyBlocks) { block in
+                            translationOnlyHistoryBlockView(block)
+                        }
+                    } else {
+                        ForEach(visibleItems) { item in
+                            historyItemView(item)
+                        }
                     }
 
                     Color.clear.frame(height: 1).id("history-bottom")
@@ -758,6 +830,9 @@ struct TranscriptionView: View {
             }
             .scrollIndicators(.hidden)
             .onChange(of: vm.historyItems.count) { _, _ in
+                withAnimation { proxy.scrollTo("history-bottom", anchor: .bottom) }
+            }
+            .onChange(of: vm.translationOnlyHistoryBlocks.count) { _, _ in
                 withAnimation { proxy.scrollTo("history-bottom", anchor: .bottom) }
             }
         }
@@ -1387,6 +1462,23 @@ struct TranscriptionView: View {
         }
     }
 
+    private func translationOnlyHistoryBlockView(_ block: TranslationOnlyHistoryBlock) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(block.speakerDisplayName)
+                .font(centerWallFont(weight: .semibold))
+                .foregroundStyle(unBlue)
+                .lineLimit(1)
+            Text(block.text)
+                .font(centerWallFont())
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .id(block.id)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+    }
+
     @ViewBuilder
     private func dynamicItemView(_ item: TranscriptionItem) -> some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -1506,6 +1598,29 @@ struct TranscriptionView: View {
 
     private func formatFileSize(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+private enum AudioInputToggleKind {
+    case microphone
+    case systemAudio
+
+    var title: String {
+        switch self {
+        case .microphone:
+            return "麦克风"
+        case .systemAudio:
+            return "电脑音频"
+        }
+    }
+
+    func symbolName(isEnabled: Bool) -> String {
+        switch self {
+        case .microphone:
+            return isEnabled ? "mic.fill" : "mic.slash"
+        case .systemAudio:
+            return isEnabled ? "speaker.wave.2.fill" : "speaker.slash"
+        }
     }
 }
 
