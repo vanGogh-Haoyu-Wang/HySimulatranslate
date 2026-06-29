@@ -442,8 +442,12 @@ struct TranscriptionView: View {
                     audioInputToggleRail
                     Divider()
                         .frame(height: 14)
-                    Text("W\(vm.whisperQueueSize) / L\(vm.llmQueueSize)")
-                        .monospacedDigit()
+                    HStack(spacing: 5) {
+                        Text("W\(vm.whisperQueueSize) / L\(vm.llmQueueSize)")
+                            .monospacedDigit()
+                        Text(vm.refinementLoadState.shortTitle)
+                            .foregroundStyle(refinementLoadColor)
+                    }
                 }
                 .font(centerWallFont())
                 .foregroundStyle(.secondary)
@@ -1273,18 +1277,26 @@ struct TranscriptionView: View {
     }
 
     private var whisperSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        HStack {
             Label("Whisper 精校", systemImage: "waveform.and.magnifyingglass")
                 .font(centerWallFont(weight: .semibold))
-            Picker("Whisper 精校", selection: $vm.whisperRefinementModeRaw) {
-                ForEach(WhisperRefinementMode.allCases) { mode in
-                    Text(mode.title).tag(mode.rawValue)
-                }
-            }
-            .font(centerWallFont())
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .disabled(vm.isRecording)
+            Spacer()
+            Label(WhisperRefinementMode.smartHybrid.title, systemImage: "cloud")
+                .font(centerWallFont())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var refinementLoadColor: Color {
+        switch vm.refinementLoadState {
+        case .normal:
+            .secondary
+        case .warning:
+            .orange
+        case .protecting:
+            .red
+        case .localFallback:
+            .blue
         }
     }
 

@@ -1,22 +1,33 @@
 import Foundation
 import WhisperKit
 
-// MARK: - 🚀 WhisperKit 本地引擎 — 先下载后加载，全程可视化
+// MARK: - 🚀 WhisperKit 本地灾备引擎 — 先准备模型，故障时按需加载
+
+struct WhisperKitRuntimeState: Equatable, Sendable {
+    let isAvailable: Bool
+    let isLoaded: Bool
+}
 
 actor WhisperKitService {
     nonisolated static let defaultModel = "large-v3-v20240930_626MB"
 
     private var whisperKit: WhisperKit?
     private var isConfigured = false
+    private var modelFolder: URL?
     private let model: String
+    private let modelSearchRoots: [URL]?
 
-    init(model: String = WhisperKitService.defaultModel) {
+    init(
+        model: String = WhisperKitService.defaultModel,
+        modelSearchRoots: [URL]? = nil
+    ) {
         self.model = model
+        self.modelSearchRoots = modelSearchRoots
     }
 
     typealias ProgressHandler = @Sendable (Double, String) -> Void
 
-    // MARK: - 配置（两步：下载 → 加载）
+    // MARK: - 配置（只准备模型，不加载 CoreML）
 
     func configure(
         allowDownload: Bool = false,
@@ -31,7 +42,7 @@ actor WhisperKitService {
             let cached = findCachedModel()
             if let cached {
                 modelFolder = cached
-                onProgress?(1.0, "模型已缓存，加载中...")
+                onProgress?(1.0, "本地灾备模型缓存可用")
             } else {
                 guard allowDownload else {
                     onProgress?(0.0, "WhisperKit 模型未缓存，使用 Sherpa 快速模式")
@@ -49,25 +60,13 @@ actor WhisperKitService {
                         onProgress?(max(0.05, fraction * 0.90), status)
                     }
                 )
-                onProgress?(0.92, "下载完成，加载模型到内存...")
+                onProgress?(0.92, "下载完成，准备按需加载...")
             }
 
-            // 第二步：加载模型
-            let pipe = try await WhisperKit(
-                modelFolder: modelFolder.path,
-                computeOptions: .init(
-                    audioEncoderCompute: .cpuAndGPU,
-                    textDecoderCompute: .cpuAndGPU
-                ),
-                verbose: false,
-                logLevel: .error,
-                load: true,
-                download: false
-            )
-            self.whisperKit = pipe
+            self.modelFolder = modelFolder
             self.isConfigured = true
-            onProgress?(1.0, "模型已就绪")
-            print("[WhisperKitService] Model '\(model)' loaded successfully")
+            onProgress?(1.0, "本地灾备模型已就绪（按需加载）")
+            print("[WhisperKitService] Model '\(model)' available for lazy fallback")
             return true
         } catch {
             onProgress?(0.0, "加载失败: \(error.localizedDescription)")
@@ -79,7 +78,11 @@ actor WhisperKitService {
     // MARK: - 转录
 
     func transcribe(pcmData: Data) async -> String? {
-        guard isConfigured, let wk = whisperKit else { return nil }
+        guard isConfigured else { return nil }
+        if whisperKit == nil {
+            guard await loadModelIfNeeded() else { return nil }
+        }
+        guard let wk = whisperKit else { return nil }
 
         let samples = pcmData.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> [Float] in
             let int16Ptr = ptr.bindMemory(to: Int16.self)
@@ -101,7 +104,44 @@ actor WhisperKitService {
     // MARK: - 缓存检查
 
     private func findCachedModel() -> URL? {
-        Self.findCachedModel(in: Self.defaultCacheSearchRoots(), model: model)
+        Self.findCachedModel(
+            in: modelSearchRoots ?? Self.defaultCacheSearchRoots(),
+            model: model
+        )
+    }
+
+    func runtimeState() -> WhisperKitRuntimeState {
+        WhisperKitRuntimeState(
+            isAvailable: isConfigured && modelFolder != nil,
+            isLoaded: whisperKit != nil
+        )
+    }
+
+    func unloadModel() {
+        whisperKit = nil
+    }
+
+    private func loadModelIfNeeded() async -> Bool {
+        if whisperKit != nil { return true }
+        guard let modelFolder else { return false }
+        do {
+            whisperKit = try await WhisperKit(
+                modelFolder: modelFolder.path,
+                computeOptions: .init(
+                    audioEncoderCompute: .cpuAndGPU,
+                    textDecoderCompute: .cpuAndGPU
+                ),
+                verbose: false,
+                logLevel: .error,
+                load: true,
+                download: false
+            )
+            print("[WhisperKitService] Model '\(model)' loaded for local fallback")
+            return true
+        } catch {
+            print("[WhisperKitService] Lazy load failed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     nonisolated static func findCachedModel(in roots: [URL], model: String) -> URL? {
@@ -237,6 +277,10 @@ actor WhisperKitService {
             return true
         }
         if stripped.components(separatedBy: "im sorry").count - 1 >= 2 {
+            return true
+        }
+
+        if !SmartWhisperRouting.containsLexicalContent(trimmed) {
             return true
         }
 

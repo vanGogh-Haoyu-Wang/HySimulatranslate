@@ -11,7 +11,7 @@ struct NoteRecord: Identifiable, Equatable {
     let previewSummary: String?
 }
 
-enum NoteFileFormat: String, CaseIterable, Identifiable {
+enum NoteFileFormat: String, CaseIterable, Identifiable, Codable, Sendable {
     case markdown
     case text
 
@@ -146,18 +146,14 @@ enum LLMTaskType: String {
 }
 
 enum WhisperRefinementMode: String, CaseIterable, Identifiable {
-    case localFirst
-    case cloudFirst
-    case localOnly
+    case smartHybrid
 
     var id: String { rawValue }
 
-    var title: String {
-        switch self {
-        case .localFirst: return "本地优先"
-        case .cloudFirst: return "云端优先"
-        case .localOnly: return "仅本地"
-        }
+    var title: String { "智能混合" }
+
+    static func fromStorageValue(_ value: String?) -> WhisperRefinementMode {
+        .smartHybrid
     }
 }
 

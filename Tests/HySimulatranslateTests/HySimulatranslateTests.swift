@@ -165,6 +165,393 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(service.shouldDropASRSegment("捕获到口音音频，分析中"))
     }
 
+    func testASRSegmentFilterDropsSymbolOnlyAndTranslationPromptJunk() {
+        let service = WhisperKitService()
+
+        XCTAssertTrue(service.shouldDropASRSegment("-"))
+        XCTAssertTrue(service.shouldDropASRSegment("-."))
+        XCTAssertTrue(service.shouldDropASRSegment("请提供需要翻译的英文文本。"))
+        XCTAssertTrue(service.shouldDropASRSegment("无内容需要翻译。"))
+    }
+
+    func testLectureFocusFilterDropsQuietShortWhispersAfterCalibration() {
+        var filter = LectureFocusFilter()
+        _ = filter.evaluate(
+            LectureSegmentMetrics(duration: 6, rmsDBFS: -18, lexicalWordCount: 12),
+            elapsed: 10
+        )
+        _ = filter.evaluate(
+            LectureSegmentMetrics(duration: 5, rmsDBFS: -20, lexicalWordCount: 10),
+            elapsed: 25
+        )
+
+        XCTAssertEqual(
+            filter.evaluate(
+                LectureSegmentMetrics(duration: 1.8, rmsDBFS: -34, lexicalWordCount: 3),
+                elapsed: 35
+            ),
+            .drop
+        )
+    }
+
+    func testLectureFocusFilterKeepsDominantShortSpeechAndSustainedQuestions() {
+        var filter = LectureFocusFilter()
+        _ = filter.evaluate(
+            LectureSegmentMetrics(duration: 6, rmsDBFS: -18, lexicalWordCount: 12),
+            elapsed: 10
+        )
+        _ = filter.evaluate(
+            LectureSegmentMetrics(duration: 5, rmsDBFS: -20, lexicalWordCount: 10),
+            elapsed: 25
+        )
+
+        XCTAssertEqual(
+            filter.evaluate(
+                LectureSegmentMetrics(duration: 1.5, rmsDBFS: -19, lexicalWordCount: 2),
+                elapsed: 35
+            ),
+            .keep
+        )
+        XCTAssertEqual(
+            filter.evaluate(
+                LectureSegmentMetrics(duration: 4, rmsDBFS: -35, lexicalWordCount: 7),
+                elapsed: 40
+            ),
+            .keepFormalQuestion
+        )
+    }
+
+    func testLectureSpeakerFocusReducerKeepsMainSpeakerAndFormalQuestionsOnly() {
+        let mainFirst = UUID()
+        let mainSecond = UUID()
+        let whisper = UUID()
+        let question = UUID()
+        let result = LectureSpeakerFocusReducer.reduce(
+            samples: [
+                LectureSpeakerSample(
+                    id: mainFirst,
+                    speakerID: "A",
+                    metrics: LectureSegmentMetrics(duration: 12, rmsDBFS: -18, lexicalWordCount: 20)
+                ),
+                LectureSpeakerSample(
+                    id: mainSecond,
+                    speakerID: "A",
+                    metrics: LectureSegmentMetrics(duration: 10, rmsDBFS: -19, lexicalWordCount: 18)
+                ),
+                LectureSpeakerSample(
+                    id: whisper,
+                    speakerID: "B",
+                    metrics: LectureSegmentMetrics(duration: 1.5, rmsDBFS: -34, lexicalWordCount: 3)
+                ),
+                LectureSpeakerSample(
+                    id: question,
+                    speakerID: "C",
+                    metrics: LectureSegmentMetrics(duration: 5, rmsDBFS: -30, lexicalWordCount: 9)
+                )
+            ]
+        )
+
+        XCTAssertEqual(result.mainSpeakerID, "A")
+        XCTAssertEqual(result.droppedIDs, [whisper])
+        XCTAssertFalse(result.droppedIDs.contains(question))
+    }
+
+    func testRefinementBackpressureWarnsAndProtectsAtBoundedThresholds() {
+        XCTAssertEqual(
+            RefinementBackpressurePolicy.loadState(pendingCount: 6, pendingAudioSeconds: 20),
+            .warning
+        )
+        XCTAssertEqual(
+            RefinementBackpressurePolicy.loadState(pendingCount: 4, pendingAudioSeconds: 30),
+            .warning
+        )
+        XCTAssertEqual(
+            RefinementBackpressurePolicy.loadState(pendingCount: 12, pendingAudioSeconds: 40),
+            .protecting
+        )
+        XCTAssertEqual(
+            RefinementBackpressurePolicy.loadState(pendingCount: 8, pendingAudioSeconds: 60),
+            .protecting
+        )
+    }
+
+    func testRefinementBackpressureDropsLowValueAndUsesSherpaForHighValueAtCapacity() {
+        XCTAssertEqual(
+            RefinementBackpressurePolicy.admission(
+                for: LectureSegmentMetrics(duration: 1.5, rmsDBFS: -36, lexicalWordCount: 2),
+                state: .protecting
+            ),
+            .drop
+        )
+        XCTAssertEqual(
+            RefinementBackpressurePolicy.admission(
+                for: LectureSegmentMetrics(duration: 8, rmsDBFS: -19, lexicalWordCount: 14),
+                state: .protecting
+            ),
+            .useSherpa
+        )
+    }
+
+    func testResourcePressurePolicyShedsHeavyWorkForWarningAndCriticalPressure() {
+        XCTAssertEqual(ResourcePressurePolicy.action(for: .normal), .none)
+        XCTAssertEqual(ResourcePressurePolicy.action(for: .warning), .shedHeavyWork)
+        XCTAssertEqual(ResourcePressurePolicy.action(for: .critical), .shedHeavyWork)
+    }
+
+    func testPipelineDiagnosticsSnapshotIncludesQueueBytesAndLoadState() {
+        let snapshot = PipelineDiagnosticsSnapshot(
+            timestamp: 123,
+            whisperQueue: 7,
+            llmQueue: 2,
+            pendingPCMBytes: 640_000,
+            loadState: .warning,
+            speakerDiarizationActive: false,
+            residentMemoryBytes: 1_048_576
+        )
+
+        XCTAssertTrue(snapshot.logLine.contains("W=7"))
+        XCTAssertTrue(snapshot.logLine.contains("L=2"))
+        XCTAssertTrue(snapshot.logLine.contains("pcmBytes=640000"))
+        XCTAssertTrue(snapshot.logLine.contains("load=预警"))
+        XCTAssertTrue(snapshot.logLine.contains("residentMB=1.0"))
+    }
+
+    func testSmartWhisperRoutingUsesLocalOnlyForExplicitCloudFailure() {
+        XCTAssertFalse(
+            SmartWhisperRouting.shouldUseLocalFallback(
+                cloudText: "A substantially longer and valid cloud transcription.",
+                cloudRequestFailed: false
+            )
+        )
+        XCTAssertTrue(
+            SmartWhisperRouting.shouldUseLocalFallback(
+                cloudText: nil,
+                cloudRequestFailed: true
+            )
+        )
+        XCTAssertTrue(
+            SmartWhisperRouting.shouldUseLocalFallback(
+                cloudText: "-",
+                cloudRequestFailed: false
+            )
+        )
+    }
+
+    func testSpeakerDiarizationWindowPlannerBoundsOneHourSessionToTenMinuteWindows() {
+        let sampleRate = 16_000
+        let windows = SpeakerDiarizationWindowPlanner.windows(
+            totalSamples: sampleRate * 60 * 60,
+            sampleRate: sampleRate
+        )
+
+        XCTAssertFalse(windows.isEmpty)
+        XCTAssertTrue(windows.allSatisfy { $0.count <= sampleRate * 60 * 10 })
+        XCTAssertEqual(windows[1].startSample, windows[0].endSample - sampleRate * 30)
+        XCTAssertEqual(windows.last?.endSample, sampleRate * 60 * 60)
+    }
+
+    func testSessionAudioStoreAppendsPCMToDiskAndTracksStableSampleSpans() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SessionAudioStoreTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = SessionAudioStore(rootDirectory: root)
+        let firstID = UUID()
+        let secondID = UUID()
+        try store.beginSession(sessionID: UUID())
+        let first = try store.appendSegment(
+            uid: firstID,
+            pcmData: Data(repeating: 1, count: 32_000)
+        )
+        let second = try store.appendSegment(
+            uid: secondID,
+            pcmData: Data(repeating: 2, count: 64_000)
+        )
+        let snapshot = try XCTUnwrap(store.finalizeSnapshot())
+
+        XCTAssertEqual(first, SpeakerAudioSpan(itemID: firstID, startSample: 0, endSample: 16_000))
+        XCTAssertEqual(second, SpeakerAudioSpan(itemID: secondID, startSample: 16_000, endSample: 48_000))
+        XCTAssertEqual(snapshot.spans, [first, second])
+        XCTAssertEqual(snapshot.totalSamples, 48_000)
+        XCTAssertEqual(
+            try Data(contentsOf: snapshot.audioURL).count,
+            96_000
+        )
+    }
+
+    func testSessionAudioStoreCleanupRemovesCompletedAudio() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SessionAudioStoreCleanupTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = SessionAudioStore(rootDirectory: root)
+        try store.beginSession(sessionID: UUID())
+        _ = try store.appendSegment(uid: UUID(), pcmData: Data(repeating: 0, count: 32_000))
+        let snapshot = try XCTUnwrap(store.finalizeSnapshot())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.audioURL.path))
+
+        store.cleanupCurrentSession()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: snapshot.audioURL.path))
+    }
+
+    func testSessionRecoveryJournalReplaysLatestTranscriptAndTranslationState() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SessionRecoveryJournalTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let noteURL = root.appendingPathComponent("Recovered.md")
+        let uid = UUID()
+        let journal = SessionRecoveryJournal()
+        try journal.begin(
+            directory: root,
+            metadata: SessionRecoveryMetadata(
+                notePath: noteURL.path,
+                courseName: "Project planning",
+                courseAbbrev: "PP",
+                translationEnabled: true,
+                noteFormat: .markdown
+            )
+        )
+        try journal.recordSegment(uid: uid, sherpaText: "Initial draft.")
+        try journal.recordRefinement(uid: uid, english: "Refined lecturer sentence.")
+        try journal.recordTranslation(uid: uid, chinese: "精校后的教师语句。")
+
+        let recovered = try XCTUnwrap(
+            SessionRecoveryJournal.loadRecoverableSession(
+                from: root.appendingPathComponent(SessionRecoveryJournal.fileName)
+            )
+        )
+
+        XCTAssertEqual(recovered.metadata.courseName, "Project planning")
+        XCTAssertEqual(recovered.items.count, 1)
+        XCTAssertEqual(recovered.items[0].id, uid)
+        XCTAssertEqual(recovered.items[0].english, "Refined lecturer sentence.")
+        XCTAssertEqual(recovered.items[0].chinese, "精校后的教师语句。")
+    }
+
+    func testSessionRecoveryJournalIgnoresTruncatedFinalLine() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TruncatedSessionJournalTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let uid = UUID()
+        let journal = SessionRecoveryJournal()
+        try journal.begin(
+            directory: root,
+            metadata: SessionRecoveryMetadata(
+                notePath: root.appendingPathComponent("Recovered.md").path,
+                courseName: "Project planning",
+                courseAbbrev: "PP",
+                translationEnabled: true,
+                noteFormat: .markdown
+            )
+        )
+        try journal.recordSegment(uid: uid, sherpaText: "A durable complete line.")
+        journal.close()
+
+        let journalURL = root.appendingPathComponent(SessionRecoveryJournal.fileName)
+        let handle = try FileHandle(forWritingTo: journalURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(#"{"kind":"refinement""#.utf8))
+        try handle.close()
+
+        let recovered = try XCTUnwrap(
+            SessionRecoveryJournal.loadRecoverableSession(from: journalURL)
+        )
+        XCTAssertEqual(recovered.items.map(\.english), ["A durable complete line."])
+    }
+
+    func testSessionRecoveryJournalIgnoresCompletedSession() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CompletedSessionJournalTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let journal = SessionRecoveryJournal()
+        try journal.begin(
+            directory: root,
+            metadata: SessionRecoveryMetadata(
+                notePath: root.appendingPathComponent("Complete.md").path,
+                courseName: "Default",
+                courseAbbrev: "Default",
+                translationEnabled: true,
+                noteFormat: .markdown
+            )
+        )
+        try journal.recordSegment(uid: UUID(), sherpaText: "Completed text.")
+        try journal.markCompleted()
+
+        XCTAssertNil(
+            try SessionRecoveryJournal.loadRecoverableSession(
+                from: root.appendingPathComponent(SessionRecoveryJournal.fileName)
+            )
+        )
+    }
+
+    func testSessionRecoveryJournalWritesRecoveredNoteAndCleansSessionDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RecoverPendingSessionTests-\(UUID().uuidString)", isDirectory: true)
+        let sessionDirectory = root.appendingPathComponent("session", isDirectory: true)
+        let notesDirectory = root.appendingPathComponent("notes", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: notesDirectory, withIntermediateDirectories: true)
+
+        let noteURL = notesDirectory.appendingPathComponent("Recovered.md")
+        let journal = SessionRecoveryJournal()
+        try journal.begin(
+            directory: sessionDirectory,
+            metadata: SessionRecoveryMetadata(
+                notePath: noteURL.path,
+                courseName: "Critical reading",
+                courseAbbrev: "CR",
+                translationEnabled: true,
+                noteFormat: .markdown
+            )
+        )
+        try journal.recordSegment(uid: UUID(), sherpaText: "Evaluate the evidence critically.")
+        try journal.recordTranslation(uid: UUID(), chinese: "不会匹配其他条目的译文。")
+        journal.close()
+
+        let recoveredURLs = try SessionRecoveryJournal.recoverPendingSessions(
+            rootDirectory: root
+        )
+
+        XCTAssertEqual(recoveredURLs, [noteURL])
+        let content = try String(contentsOf: noteURL, encoding: .utf8)
+        XCTAssertTrue(content.contains("Evaluate the evidence critically."))
+        XCTAssertTrue(content.contains("会话异常中断"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDirectory.path))
+    }
+
+    func testWhisperRefinementModeMigratesEveryLegacyValueToSmartHybrid() {
+        for legacy in ["localFirst", "cloudFirst", "localOnly", "unknown"] {
+            XCTAssertEqual(WhisperRefinementMode.fromStorageValue(legacy), .smartHybrid)
+        }
+        XCTAssertEqual(WhisperRefinementMode.smartHybrid.title, "智能混合")
+    }
+
+    @MainActor
+    func testViewModelPersistsLegacyWhisperModeAsSmartHybrid() {
+        let defaults = UserDefaults.standard
+        let previous = defaults.string(forKey: "whisperRefinementMode")
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: "whisperRefinementMode")
+            } else {
+                defaults.removeObject(forKey: "whisperRefinementMode")
+            }
+        }
+        defaults.set("localOnly", forKey: "whisperRefinementMode")
+
+        let vm = TranscriptionViewModel()
+
+        XCTAssertEqual(vm.whisperRefinementModeRaw, WhisperRefinementMode.smartHybrid.rawValue)
+    }
+
     func testSherpaNoTextCutKeepsShortAccentAnalysisWindow() {
         XCTAssertFalse(SherpaService.shouldCutNoTextSegment(text: "", audioSec: 1.9))
         XCTAssertTrue(SherpaService.shouldCutNoTextSegment(text: "", audioSec: 2.0))
@@ -230,6 +617,70 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(vm.dynamicItems.count, 2)
     }
 
+    @MainActor
+    func testWhisperQueueNeverExceedsProtectingCapacityAndHighValueOverflowUsesSherpa() {
+        let vm = TranscriptionViewModel()
+        let fiveSecondsPCM = Data(repeating: 1, count: 160_000)
+
+        for index in 0..<16 {
+            vm.enqueueWhisperItemForTesting(
+                uid: UUID(),
+                pcm: fiveSecondsPCM,
+                sherpaText: "This is a meaningful lecturer sentence number \(index)."
+            )
+        }
+
+        XCTAssertEqual(vm.whisperQueueSize, RefinementBackpressurePolicy.protectingCount)
+        XCTAssertEqual(vm.refinementLoadState, .protecting)
+        XCTAssertGreaterThan(vm.llmQueueSize, 0)
+    }
+
+    @MainActor
+    func testWhisperQueueAudioNeverExceedsProtectingDuration() {
+        let vm = TranscriptionViewModel()
+        let twentyFiveSecondsPCM = Data(repeating: 1, count: 800_000)
+        let twentySecondsPCM = Data(repeating: 1, count: 640_000)
+
+        for index in 0..<2 {
+            vm.enqueueWhisperItemForTesting(
+                uid: UUID(),
+                pcm: twentyFiveSecondsPCM,
+                sherpaText: "This is sustained high value lecture content number \(index)."
+            )
+        }
+        vm.enqueueWhisperItemForTesting(
+            uid: UUID(),
+            pcm: twentySecondsPCM,
+            sherpaText: "This third substantial segment should use the Sherpa draft."
+        )
+
+        XCTAssertEqual(vm.whisperQueueSize, 2)
+        XCTAssertEqual(vm.refinementLoadState, .warning)
+        XCTAssertGreaterThan(vm.llmQueueSize, 0)
+    }
+
+    @MainActor
+    func testStopDegradesPendingWhisperItemsToCompletedSherpaText() {
+        let vm = TranscriptionViewModel()
+        vm.isRecording = true
+        vm.enqueueWhisperItemForTesting(
+            uid: UUID(),
+            pcm: Data(repeating: 1, count: 64_000),
+            sherpaText: "Pending lecturer content must survive stopping."
+        )
+        XCTAssertEqual(vm.whisperQueueSize, 1)
+
+        vm.stopTranscription()
+
+        XCTAssertEqual(vm.whisperQueueSize, 0)
+        XCTAssertTrue(
+            vm.historyItems.contains {
+                $0.english == "Pending lecturer content must survive stopping." &&
+                $0.status == .done
+            }
+        )
+    }
+
     func testASRSegmentFilterKeepsThanksWhenSessionIsEnding() {
         let service = WhisperKitService()
 
@@ -284,6 +735,30 @@ final class HySimulatranslateTests: XCTestCase {
         let found = WhisperKitService.findCachedModel(in: [root], model: "large-v3")
 
         XCTAssertNil(found)
+    }
+
+    func testWhisperKitSelfCheckKeepsLocalFallbackModelUnloaded() async throws {
+        let root = try makeTemporaryDirectory()
+        let variant = root.appendingPathComponent(
+            "openai_whisper-large-v3-v20240930_626MB",
+            isDirectory: true
+        )
+        for component in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {
+            try FileManager.default.createDirectory(
+                at: variant.appendingPathComponent("\(component).mlmodelc"),
+                withIntermediateDirectories: true
+            )
+        }
+        let service = WhisperKitService(
+            modelSearchRoots: [root]
+        )
+
+        let ready = await service.configure(allowDownload: false)
+        let state = await service.runtimeState()
+
+        XCTAssertTrue(ready)
+        XCTAssertTrue(state.isAvailable)
+        XCTAssertFalse(state.isLoaded)
     }
 
     func testTranslationChunkingKeepsQueriesUnderLimit() {
@@ -1204,7 +1679,7 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(vm.historyItems.map(\.english), [
             "[自检] 电脑音频: 通过",
             "[自检] Sherpa: 通过",
-            "[自检] WhisperKit large-v3: 通过"
+            "[自检] WhisperKit 本地灾备: 通过"
         ])
     }
 
@@ -1389,7 +1864,7 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(vm.historyItems.map(\.english), [
             "[自检] 麦克风: 通过",
             "[自检] Sherpa: 通过",
-            "[自检] WhisperKit large-v3: 通过",
+            "[自检] WhisperKit 本地灾备: 通过",
             "[自检] Groq / llama-3.3-70b-versatile: 通过",
             "[自检] NVIDIA 总结 / nvidia/llama-3.3-nemotron-super-49b-v1: 未配置"
         ])
