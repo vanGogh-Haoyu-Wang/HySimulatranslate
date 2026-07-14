@@ -1,5 +1,26 @@
 import SwiftUI
 
+struct MeetingDetailCapabilities: Equatable {
+    let canRetranscribe: Bool
+    let canRetranslate: Bool
+    let isLegacyPreviewOnly: Bool
+
+    init(
+        meeting: MeetingRecord,
+        hasPlayableAudio: Bool,
+        revisions: [TranscriptRevisionRecord],
+        selectedRevisionID: UUID?
+    ) {
+        canRetranscribe = hasPlayableAudio
+        canRetranslate = revisions.contains {
+            $0.id == selectedRevisionID && $0.status == .succeeded
+        }
+        isLegacyPreviewOnly = meeting.source == .legacyImported
+            && !hasPlayableAudio
+            && revisions.isEmpty
+    }
+}
+
 @MainActor protocol MeetingSidebarViewModel: ObservableObject {
     var isRecording: Bool { get }; var isFinalizingSession: Bool { get }; var isImportingAudio: Bool { get }
     var importProgress: Double { get }; var meetingLibraryStatus: String { get }; var isMeetingLibraryReady: Bool { get }
@@ -29,14 +50,12 @@ struct MeetingSidebarView<VM: MeetingSidebarViewModel>: View {
             VStack(spacing: 4) {
                 actionButton(title: "新记录", systemImage: "square.and.pencil", isDisabled: vm.isRecording || vm.isFinalizingSession, action: onNewRecord)
                 actionButton(title: "强化专项", systemImage: "book.closed", action: onSelectCourses)
+                actionButton(title: "音频转写", systemImage: "waveform.badge.plus", isDisabled: vm.isRecording || vm.isFinalizingSession || vm.isImportingAudio, action: onImportAudio)
             }
 
             HStack {
                 Text("记录").font(.caption.weight(.semibold)).foregroundStyle(.secondary.opacity(0.72))
                 Spacer()
-                Button(action: onImportAudio) { Label("导入音频", systemImage: "square.and.arrow.down") }
-                    .font(.caption.weight(.medium)).buttonStyle(.plain)
-                    .disabled(vm.isRecording || vm.isFinalizingSession || vm.isImportingAudio)
                 Button("刷新") {
                     vm.refreshNoteRecords()
                     vm.refreshMeetingLibrary()
@@ -167,6 +186,7 @@ struct MeetingPlaybackView: View {
     var selectedMeetingAudioURL: URL? { get }; var meetingPlayback: MeetingPlaybackController { get }
     var selectedMeetingSegments: [TranscriptSegmentRecord] { get }; var selectedMeetingTranslations: [UUID: String] { get }
     var selectedMeetingSpeakerAliases: [String: String] { get }
+    var selectedMeetingCapabilities: MeetingDetailCapabilities { get }
     var retranslationStatus: String { get }; var retranslationError: String? { get }
     func selectMeetingRevision(_ revisionID: UUID?); func selectTranslationRevision(_ revisionID: UUID?)
     func retranscribeSelectedMeeting(options: ImportOptions) async; func retranslateSelectedMeeting() async
@@ -195,11 +215,31 @@ struct TranscriptTimelineView<VM: TranscriptTimelineViewModel>: View {
                 ))
             }
             HStack {
-                Button("重新转写") {
-                    Task { await vm.retranscribeSelectedMeeting(options: .init(subjectID: meeting.subjectID, sourceLanguage: "en", translate: false, targetLanguage: "zh", whisperModel: WhisperKitService.defaultModel, diarize: false)) }
+                if vm.selectedMeetingCapabilities.canRetranscribe {
+                    Button("重新转写") {
+                        Task { await vm.retranscribeSelectedMeeting(options: .init(subjectID: meeting.subjectID, sourceLanguage: "en", translate: false, targetLanguage: "zh", whisperModel: WhisperKitService.defaultModel, diarize: false)) }
+                    }
                 }
-                Button("重新翻译") { Task { await vm.retranslateSelectedMeeting() } }
+                if vm.selectedMeetingCapabilities.canRetranslate {
+                    Button("重新翻译") { Task { await vm.retranslateSelectedMeeting() } }
+                }
             }.disabled(vm.isImportingAudio || vm.isRecording || vm.isFinalizingSession)
+            if vm.selectedMeetingCapabilities.isLegacyPreviewOnly {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("旧笔记仅供预览，无录音和转写版本", systemImage: "doc.text.magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    if let path = meeting.legacyNotePath {
+                        Text(path)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
+                    Text("索引于 \(meeting.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 8)
+            }
             if !vm.retranslationStatus.isEmpty {
                 HStack {
                     Text(vm.retranslationError.map { "\(vm.retranslationStatus)：\($0)" } ?? vm.retranslationStatus)
@@ -248,15 +288,6 @@ struct TranscriptTimelineView<VM: TranscriptTimelineViewModel>: View {
             }
         }
     }
-}
-
-/// Stable workspace entry point for both picker and drag-and-drop imports.
-struct ImportWorkspaceView: View {
-    let subjects: [CourseSubject]
-    let progress: Double
-    let onImport: (URL, ImportOptions) async -> Void
-
-    var body: some View { AudioImportView(subjects: subjects, progress: progress, onImport: onImport) }
 }
 
 private enum PlaybackTimeFormatter {

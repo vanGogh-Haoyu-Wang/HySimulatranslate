@@ -751,11 +751,14 @@ final class HySimulatranslateTests: XCTestCase {
             .appendingPathComponent("abc123")
             .appendingPathComponent("openai_whisper-large-v3")
         for component in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {
+            let bundle = variant.appendingPathComponent("\(component).mlmodelc")
             try FileManager.default.createDirectory(
-                at: variant.appendingPathComponent("\(component).mlmodelc"),
+                at: bundle,
                 withIntermediateDirectories: true
             )
+            try Data([1]).write(to: bundle.appendingPathComponent("weights.bin"))
         }
+        try Data([1]).write(to: variant.appendingPathComponent("config.json"))
 
         let found = WhisperKitService.findCachedModel(in: [root], model: "large-v3")
 
@@ -782,11 +785,14 @@ final class HySimulatranslateTests: XCTestCase {
             isDirectory: true
         )
         for component in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {
+            let bundle = variant.appendingPathComponent("\(component).mlmodelc")
             try FileManager.default.createDirectory(
-                at: variant.appendingPathComponent("\(component).mlmodelc"),
+                at: bundle,
                 withIntermediateDirectories: true
             )
+            try Data([1]).write(to: bundle.appendingPathComponent("weights.bin"))
         }
+        try Data([1]).write(to: variant.appendingPathComponent("config.json"))
         let service = WhisperKitService(
             modelSearchRoots: [root]
         )

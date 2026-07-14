@@ -1,5 +1,22 @@
 import SwiftUI
 
+enum WorkspaceColumnLayout {
+    static func rightWidth(
+        totalWidth: CGFloat,
+        spacing: CGFloat,
+        centerRatio: CGFloat = 7,
+        rightRatio: CGFloat = 4,
+        minimumRightWidth: CGFloat = 280,
+        minimumCenterWidth: CGFloat = 320
+    ) -> CGFloat {
+        let available = max(0, totalWidth - spacing)
+        guard available > minimumCenterWidth else { return 0 }
+        let preferred = available * rightRatio / (centerRatio + rightRatio)
+        let maximum = max(0, available - minimumCenterWidth)
+        return min(max(minimumRightWidth, preferred), maximum)
+    }
+}
+
 // MARK: - Codex 式三栏工作台
 
 struct TranscriptionView: View {
@@ -18,8 +35,6 @@ struct TranscriptionView: View {
     @State private var coursePendingDeletion: CourseSubject?
     @State private var isLeftSidebarCollapsed = false
     @State private var isSummaryPaneCollapsed = false
-    @State private var activeNotePreview: NoteRecord?
-    @State private var showingAudioImport = false
 
     private let layoutSpacing: CGFloat = 12
     private let leftRatio: CGFloat = 3
@@ -125,7 +140,7 @@ struct TranscriptionView: View {
     }
 
     private var canReturnToTranscription: Bool {
-        (workspaceMode == .settings || workspaceMode == .courseSelection)
+        (workspaceMode == .settings || workspaceMode == .courseSelection || workspaceMode == .audioImport)
             && !courseDB.allSubjects.isEmpty
     }
 
@@ -163,16 +178,21 @@ struct TranscriptionView: View {
                             vm: vm,
                             onNewRecord: createNewRecord,
                             onSelectCourses: { workspaceMode = .courseSelection },
-                            onImportAudio: { showingAudioImport = true },
+                            onImportAudio: {
+                                workspaceMode = .audioImport
+                                isSummaryPaneCollapsed = false
+                            },
                             onSelectMeeting: { meeting in
-                                vm.selectMeeting(meeting)
-                                activeNotePreview = nil
                                 workspaceMode = .transcription
+                                Task {
+                                    await vm.selectMeetingForNavigation(meeting)
+                                    if vm.selectedNoteRecord != nil { isSummaryPaneCollapsed = false }
+                                }
                             },
                             onSelectNote: { record in
+                                workspaceMode = .transcription
                                 Task {
-                                    await vm.loadNotePreview(record)
-                                    activeNotePreview = record
+                                    await vm.selectNoteForNavigation(record)
                                     isSummaryPaneCollapsed = false
                                 }
                             },
@@ -200,11 +220,6 @@ struct TranscriptionView: View {
         .frame(minWidth: 1320, minHeight: 720)
         .sheet(isPresented: $showingAddSubject) {
             AddSubjectView(courseDB: courseDB)
-        }
-        .sheet(isPresented: $showingAudioImport) {
-            ImportWorkspaceView(subjects: courseDB.allSubjects, progress: vm.importProgress) { url, options in
-                await vm.importAudio(from: url, options: options)
-            }
         }
         .confirmationDialog(
             "删除强化专项？",
@@ -279,7 +294,9 @@ struct TranscriptionView: View {
             VStack(spacing: 8) {
                 mainContentRow
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                dynamicInputPanel
+                if workspaceMode != .audioImport {
+                    dynamicInputPanel
+                }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 14)
@@ -340,10 +357,10 @@ struct TranscriptionView: View {
                 .foregroundStyle(.secondary.opacity(0.85))
                 .help(isSummaryPaneCollapsed ? "展开笔记总结区" : "收起笔记总结区")
 
-                if activeNotePreview != nil {
+                if vm.selectedNoteRecord != nil {
                     Button {
                         withAnimation(.snappy) {
-                            activeNotePreview = nil
+                            vm.clearNotePreview()
                         }
                     } label: {
                         Image(systemName: "xmark.circle")
@@ -472,14 +489,20 @@ struct TranscriptionView: View {
 
     private var mainContentRow: some View {
         GeometryReader { proxy in
-            let spacing = isSummaryPaneCollapsed ? CGFloat(0) : layoutSpacing
-            let rightWidth = max(280, (proxy.size.width - spacing) * rightRatio / (centerRatio + rightRatio))
+            let rightWidth = isSummaryPaneCollapsed ? 0 : WorkspaceColumnLayout.rightWidth(
+                totalWidth: proxy.size.width,
+                spacing: layoutSpacing,
+                centerRatio: centerRatio,
+                rightRatio: rightRatio
+            )
+            let showsRightPanel = !isSummaryPaneCollapsed && rightWidth > 0
+            let spacing = showsRightPanel ? layoutSpacing : 0
 
             HStack(alignment: .top, spacing: spacing) {
                 centerContentPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if !isSummaryPaneCollapsed {
+                if showsRightPanel {
                     rightContentPanel
                         .frame(width: rightWidth)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -496,7 +519,19 @@ struct TranscriptionView: View {
             courseSelectionPanel
         case .settings:
             settingsPanel
-        case .transcription, .notePreview:
+        case .audioImport:
+            AudioImportWorkspaceView(
+                subjects: courseDB.allSubjects,
+                progress: vm.importProgress,
+                status: vm.meetingLibraryStatus,
+                onImport: { url, options in
+                    await vm.importAudio(from: url, options: options)
+                },
+                onComplete: {
+                    workspaceMode = .transcription
+                }
+            )
+        case .transcription:
             sessionHistoryPanel
         }
     }
@@ -665,7 +700,7 @@ struct TranscriptionView: View {
 
     @ViewBuilder
     private var rightContentPanel: some View {
-        if activeNotePreview != nil {
+        if vm.selectedNoteRecord != nil {
             notePreviewOverlayPanel
         } else {
             summaryEnvironmentPanel
@@ -782,7 +817,7 @@ struct TranscriptionView: View {
                 Text("历史笔记")
                     .font(centerWallFont(weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(activeNotePreview?.fileName ?? vm.selectedNoteRecord?.fileName ?? "笔记")
+                Text(vm.selectedNoteRecord?.fileName ?? "笔记")
                     .font(centerWallFont(weight: .semibold))
                     .lineLimit(2)
                 Text(vm.notePreviewStatus)
@@ -805,7 +840,7 @@ struct TranscriptionView: View {
     private var notePreviewContent: some View {
         let text = vm.notePreviewText.isEmpty ? vm.notePreviewStatus : vm.notePreviewText
         let isEmpty = vm.notePreviewText.isEmpty
-        let format = activeNotePreview?.format ?? vm.selectedNoteRecord?.format
+        let format = vm.selectedNoteRecord?.format
 
         if format == .markdown, !isEmpty {
             MarkdownNotePreview(text: text)
@@ -1405,7 +1440,7 @@ struct TranscriptionView: View {
         normalizeCourseSelection()
         vm.startNewRecordWithoutSelfCheck()
         vm.runSystemCheck()
-        activeNotePreview = nil
+        vm.clearNotePreview()
         workspaceMode = .transcription
     }
 

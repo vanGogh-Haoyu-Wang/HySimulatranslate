@@ -25,7 +25,7 @@ struct CloudModelProviderState: Identifiable, Equatable, Sendable {
 struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let displayName: String; let size: Int64; let affectedCapability: String }
 
 @MainActor final class ModelCenterViewModel: ObservableObject {
-    typealias Installer = @MainActor (String, @escaping @Sendable (Double, String) -> Void) async throws -> Void
+    typealias Installer = @MainActor (String, @escaping @Sendable (Double, String) -> Void) async throws -> URL?
     @Published private(set) var localResources: [ModelResourceSnapshot] = []
     @Published private(set) var cloudProviders: [CloudModelProviderState] = []
     @Published private(set) var progressByResource: [String: Double] = [:]
@@ -43,6 +43,11 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
         self.resourceService = resourceService; self.providerKeys = providerKeys; self.cloudClient = cloudClient; self.installer = installer
         self.selectedModelIDs = selectedModels()
         self.onModelSelectionChanged = onModelSelectionChanged
+        do {
+            try resourceService.migrateLegacyManagedModelsIfNeeded()
+        } catch {
+            lastError = error.localizedDescription
+        }
         rescan()
         cloudProviders = LLMProviderID.allCases.map { .init(id: $0, configured: false, models: [], connectivity: .notConfigured) }
     }
@@ -99,10 +104,14 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
     func download(resourceID: String) async {
         lastError = nil; progressByResource[resourceID] = 0
         do {
-            try await installer(resourceID) { [weak self] progress, status in Task { @MainActor in self?.progressByResource[resourceID] = progress; self?.statusByResource[resourceID] = status } }
+            try resourceService.migrateLegacyManagedModelsIfNeeded()
+            let installedLocation = try await installer(resourceID) { [weak self] progress, status in Task { @MainActor in self?.progressByResource[resourceID] = progress; self?.statusByResource[resourceID] = status } }
             rescan()
-            guard localResources.first(where: { $0.definition.id == resourceID })?.state == .ready else {
-                throw NSError(domain: "ModelCenter", code: 2, userInfo: [NSLocalizedDescriptionKey: "下载结果未通过模型完整性校验"])
+            guard let report = resourceService.validationReport(resourceID: resourceID), report.state == .ready else {
+                let report = resourceService.validationReport(resourceID: resourceID)
+                let fallbackPath = installedLocation?.path ?? "未知路径"
+                let message = report?.failureDescription ?? "模型完整性校验失败。实际下载路径：\(fallbackPath)"
+                throw NSError(domain: "ModelCenter.Integrity", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
             }
             progressByResource[resourceID] = 1
         } catch { lastError = error.localizedDescription; statusByResource[resourceID] = "失败，可重试"; rescan() }
@@ -117,16 +126,17 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
         do { try resourceService.delete(resourceID: request.resourceID); pendingDeletion = nil; lastError = nil; rescan() }
         catch { lastError = error.localizedDescription }
     }
-    nonisolated private static func defaultInstaller(resourceID: String, progress: @escaping @Sendable (Double, String) -> Void) async throws {
+    nonisolated private static func defaultInstaller(resourceID: String, progress: @escaping @Sendable (Double, String) -> Void) async throws -> URL? {
         switch resourceID {
-        case "sherpa": _ = try await ResourceDownloadService.ensureSherpaModel(onProgress: progress)
-        case "vad": _ = try await ResourceDownloadService.ensureVADModel(onProgress: progress)
+        case "sherpa": return try await ResourceDownloadService.ensureSherpaModel(onProgress: progress)
+        case "vad": return try await ResourceDownloadService.ensureVADModel(onProgress: progress)
         case "whisperkit":
-            guard await WhisperKitService().configure(allowDownload: true, onProgress: progress) else { throw ModelResourceError.resourceMissing }
+            return try await WhisperKitService().prepareModel(allowDownload: true, onProgress: progress)
         case "speakerkit":
             progress(0.05, "检查 SpeakerKit 模型...")
-            guard await SpeakerDiarizationService().configure(allowDownload: true) else { throw ModelResourceError.resourceMissing }
+            let location = try await SpeakerDiarizationService().prepareModel(allowDownload: true)
             progress(1, "SpeakerKit 模型已就绪")
+            return location
         default: throw ModelResourceError.resourceMissing
         }
     }

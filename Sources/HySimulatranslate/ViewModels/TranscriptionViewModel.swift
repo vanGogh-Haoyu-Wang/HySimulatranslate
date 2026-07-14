@@ -77,6 +77,22 @@ final class TranscriptionViewModel: ObservableObject {
         Self.deduplicatedNoteRecords(noteRecords, meetings: meetings)
     }
     var meetingPlayback: MeetingPlaybackController { appServices.playback }
+    var selectedMeetingCapabilities: MeetingDetailCapabilities {
+        guard let meeting = selectedMeeting else {
+            return MeetingDetailCapabilities(
+                meeting: MeetingRecord(title: "", source: .live),
+                hasPlayableAudio: false,
+                revisions: [],
+                selectedRevisionID: nil
+            )
+        }
+        return MeetingDetailCapabilities(
+            meeting: meeting,
+            hasPlayableAudio: selectedMeetingAudioURL != nil,
+            revisions: selectedMeetingRevisions,
+            selectedRevisionID: selectedMeetingRevisionID
+        )
+    }
     @AppStorage("whisperRefinementMode") var whisperRefinementModeRaw = WhisperRefinementMode.smartHybrid.rawValue
     @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
     @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
@@ -327,9 +343,65 @@ final class TranscriptionViewModel: ObservableObject {
 
     func selectMeeting(_ meeting: MeetingRecord) {
         guard !isRecording, !isFinalizingSession else { return }
+        clearNotePreview()
+        selectMeetingData(meeting)
+    }
+
+    func selectMeetingForNavigation(_ meeting: MeetingRecord) async {
+        guard !isRecording, !isFinalizingSession else { return }
+        guard let note = Self.legacyNoteRecord(for: meeting) else {
+            selectMeeting(meeting)
+            return
+        }
+        selectMeetingData(meeting)
+        await loadNotePreview(note)
+    }
+
+    func selectNoteForNavigation(_ record: NoteRecord) async {
+        guard !isRecording, !isFinalizingSession else { return }
+        clearSelectedMeeting()
+        await loadNotePreview(record)
+    }
+
+    func clearNotePreview() {
+        selectedNoteRecord = nil
+        notePreviewText = ""
+        notePreviewStatus = ""
+    }
+
+    nonisolated static func legacyNoteRecord(for meeting: MeetingRecord) -> NoteRecord? {
+        guard meeting.source == .legacyImported,
+              let path = meeting.legacyNotePath,
+              !path.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard let format = NoteFileFormat.fromFileExtension(url.pathExtension) else { return nil }
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        return NoteRecord(
+            url: url,
+            fileName: url.lastPathComponent,
+            format: format,
+            modifiedAt: values?.contentModificationDate ?? meeting.updatedAt,
+            fileSize: Int64(values?.fileSize ?? 0),
+            previewSummary: meeting.preview
+        )
+    }
+
+    private func selectMeetingData(_ meeting: MeetingRecord) {
         summaryWorkspace?.load(meeting: meeting)
         do {
-            guard let selection = try meetingLibraryController?.select(meeting) else { return }
+            guard let controller = meetingLibraryController else {
+                selectedMeeting = meeting
+                selectedMeetingSegments = []
+                selectedMeetingRevisions = []
+                selectedTranslationRevisions = []
+                selectedMeetingRevisionID = meeting.currentTranscriptRevisionID
+                selectedTranslationRevisionID = meeting.currentTranslationRevisionID
+                selectedMeetingAudioURL = nil
+                selectedMeetingSpeakerAliases = [:]
+                selectedMeetingTranslations = [:]
+                return
+            }
+            let selection = try controller.select(meeting)
             selectedMeeting = selection.meeting; selectedMeetingSegments = selection.segments
             selectedMeetingRevisions = selection.revisions; selectedTranslationRevisions = selection.translationRevisions
             selectedMeetingRevisionID = meeting.currentTranscriptRevisionID; selectedTranslationRevisionID = meeting.currentTranslationRevisionID
@@ -425,9 +497,21 @@ final class TranscriptionViewModel: ObservableObject {
     }
     func cancelImport(jobID: UUID) { importWorkspaceController?.cancel(jobID: jobID) }
 
-    func importAudio(from url: URL, options: ImportOptions) async {
-        guard !isRecording, !isFinalizingSession, let workspace = importWorkspaceController else { return }
+    @discardableResult
+    func importAudio(from url: URL, options: ImportOptions) async -> Bool {
+        guard !isRecording, !isFinalizingSession, let workspace = importWorkspaceController else { return false }
         isImportingAudio = true; importProgress = 0; meetingLibraryStatus = "正在导入 \(url.lastPathComponent)…"
+        let progressTask = Task { @MainActor [weak self, weak workspace] in
+            while !Task.isCancelled {
+                if let value = workspace?.progress { self?.importProgress = value }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        defer {
+            progressTask.cancel()
+            importProgress = workspace.progress
+            isImportingAudio = false
+        }
         do {
             let credential = LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)
             let meeting = try await workspace.importAudio(from: url, options: options, sessionsRoot: Self.sessionAssetsRootDirectory(), credential: credential)
@@ -435,8 +519,13 @@ final class TranscriptionViewModel: ObservableObject {
             meetingLibraryStatus = "导入完成"
             refreshMeetingLibrary()
             selectMeeting(meeting)
-        } catch { meetingLibraryStatus = "导入失败：\(error.localizedDescription)" }
-        isImportingAudio = false
+            return true
+        } catch {
+            meetingLibraryStatus = error.localizedDescription.contains("任务已取消")
+                ? "导入已取消"
+                : "导入失败：\(error.localizedDescription)"
+            return false
+        }
     }
 
     func deleteMeeting(_ meeting: MeetingRecord) {
@@ -621,13 +710,13 @@ final class TranscriptionViewModel: ObservableObject {
             let text = try await Task.detached(priority: .userInitiated) {
                 try String(contentsOf: record.url, encoding: .utf8)
             }.value
-            selectedNoteRecord = record
+            guard selectedNoteRecord?.id == record.id else { return }
             notePreviewText = text
             notePreviewStatus = "已载入"
         } catch {
-            selectedNoteRecord = record
+            guard selectedNoteRecord?.id == record.id else { return }
             notePreviewText = ""
-            notePreviewStatus = "读取失败：\(error.localizedDescription)"
+            notePreviewStatus = "读取失败：\(error.localizedDescription)\n\(record.url.path)"
         }
     }
 
@@ -1488,10 +1577,17 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func clearSelectedMeeting() {
+        meetingLibraryController?.clearSelection()
         meetingPlayback.unload()
         selectedMeeting = nil
         selectedMeetingSegments = []
         selectedMeetingAudioURL = nil
+        selectedMeetingRevisions = []
+        selectedTranslationRevisions = []
+        selectedMeetingRevisionID = nil
+        selectedTranslationRevisionID = nil
+        selectedMeetingTranslations = [:]
+        selectedMeetingSpeakerAliases = [:]
         summaryWorkspace?.load(meeting: nil)
     }
 

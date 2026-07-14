@@ -3,9 +3,9 @@ import Foundation
 enum ModelResourceState: Equatable, Sendable { case missing, corrupt, ready }
 enum ModelResourceLocationKind: Equatable, Sendable { case file, directory }
 struct ModelResourceDefinition: Equatable, Sendable {
-    let id: String; let displayName: String; let location: URL; let requiredFiles: [String]; let affectedCapability: String; let version: String?; let locationKind: ModelResourceLocationKind; let minimumBytes: Int64
-    init(id: String, displayName: String, location: URL, requiredFiles: [String], affectedCapability: String, version: String? = nil, locationKind: ModelResourceLocationKind = .directory, minimumBytes: Int64 = 1) {
-        self.id = id; self.displayName = displayName; self.location = location; self.requiredFiles = requiredFiles; self.affectedCapability = affectedCapability; self.version = version; self.locationKind = locationKind; self.minimumBytes = minimumBytes
+    let id: String; let displayName: String; let location: URL; let requiredFiles: [String]; let affectedCapability: String; let version: String?; let locationKind: ModelResourceLocationKind; let minimumBytes: Int64; let validationKind: ModelResourceValidationKind
+    init(id: String, displayName: String, location: URL, requiredFiles: [String], affectedCapability: String, version: String? = nil, locationKind: ModelResourceLocationKind = .directory, minimumBytes: Int64 = 1, validationKind: ModelResourceValidationKind = .generic) {
+        self.id = id; self.displayName = displayName; self.location = location; self.requiredFiles = requiredFiles; self.affectedCapability = affectedCapability; self.version = version; self.locationKind = locationKind; self.minimumBytes = minimumBytes; self.validationKind = validationKind
     }
 }
 struct ModelResourceSnapshot: Equatable, Sendable {
@@ -27,16 +27,22 @@ final class ModelResourceLease: @unchecked Sendable {
 }
 
 final class ModelResourceService: @unchecked Sendable {
-    static let shared = ModelResourceService(resources: standardResources())
+    static let shared = ModelResourceService(resources: standardResources(), managedModelStore: .standard)
     let resources: [ModelResourceDefinition]
     private struct LeaseEntry { let owner: String; let resourceIDs: Set<String> }
     private var leases: [UUID: LeaseEntry] = [:]
     private var deletingResourceIDs: Set<String> = []
     private let lock = NSLock()
     private let removeItem: @Sendable (URL) throws -> Void
-    init(resources: [ModelResourceDefinition], removeItem: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) { self.resources = resources; self.removeItem = removeItem }
+    private let managedModelStore: ManagedModelStore?
+    init(resources: [ModelResourceDefinition], managedModelStore: ManagedModelStore? = nil, removeItem: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) { self.resources = resources; self.managedModelStore = managedModelStore; self.removeItem = removeItem }
 
     func scan() -> [ModelResourceSnapshot] { resources.map(snapshot) }
+    func validationReport(resourceID: String) -> ModelResourceValidationReport? {
+        guard let resource = resources.first(where: { $0.id == resourceID }) else { return nil }
+        return Self.validationReport(for: resource)
+    }
+    func migrateLegacyManagedModelsIfNeeded() throws { try managedModelStore?.migrateLegacyRepositoriesIfNeeded() }
     func acquireLease(owner: String) -> ModelResourceLease { acquireLease(resourceIDs: Set(resources.map(\.id)), owner: owner) }
     func acquireLease(resourceIDs: Set<String>, owner: String) -> ModelResourceLease {
         (try? tryAcquireLease(resourceIDs: resourceIDs, owner: owner)) ?? ModelResourceLease(release: {})
@@ -62,41 +68,31 @@ final class ModelResourceService: @unchecked Sendable {
         if FileManager.default.fileExists(atPath: resource.location.path) { try removeItem(resource.location) }
     }
     private func snapshot(_ resource: ModelResourceDefinition) -> ModelResourceSnapshot {
-        guard FileManager.default.fileExists(atPath: resource.location.path) else { return .init(definition: resource, state: .missing, size: 0, activeOwners: activeOwners(resourceID: resource.id)) }
-        let values = try? resource.location.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
-        let shapeValid = resource.locationKind == .file ? values?.isRegularFile == true : values?.isDirectory == true
-        let components = ((FileManager.default.enumerator(at: resource.location, includingPropertiesForKeys: [.fileSizeKey]))?.allObjects as? [URL]) ?? []
-        let requiredValid = resource.requiredFiles.allSatisfy { required in
-            if required.contains("*") {
-                let prefix = required.split(separator: "*").first.map(String.init) ?? ""
-                return components.contains { $0.lastPathComponent.hasPrefix(prefix) && Self.fileSize($0) > 0 }
-            }
-            let url = resource.location.appendingPathComponent(required)
-            return FileManager.default.fileExists(atPath: url.path) && Self.fileSize(url) > 0
-        }
-        var size: Int64 = 0
-        if values?.isRegularFile == true {
-            size = Self.fileSize(resource.location)
-        } else {
-            let enumerator = FileManager.default.enumerator(at: resource.location, includingPropertiesForKeys: [.fileSizeKey])
-            while let url = enumerator?.nextObject() as? URL { size += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
-        }
-        let valid = shapeValid && size >= resource.minimumBytes && requiredValid
-        return .init(definition: resource, state: valid ? .ready : .corrupt, size: size, activeOwners: activeOwners(resourceID: resource.id))
+        let report = Self.validationReport(for: resource)
+        return .init(definition: resource, state: report.state, size: report.size, activeOwners: activeOwners(resourceID: resource.id))
     }
 
-    private static func fileSize(_ url: URL) -> Int64 {
-        Int64(((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0)
+    private static func validationReport(for resource: ModelResourceDefinition) -> ModelResourceValidationReport {
+        ManagedModelStore.validationReport(
+            at: resource.location,
+            kind: resource.validationKind,
+            requiredFiles: resource.requiredFiles,
+            locationKind: resource.locationKind,
+            minimumBytes: resource.minimumBytes
+        )
     }
 
     static func standardResources(support: URL = AppResourceLocator.defaultSupportDirectory()) -> [ModelResourceDefinition] {
         func resource(_ path: String) -> URL { path.split(separator: "/").reduce(support) { $0.appendingPathComponent(String($1)) } }
-        let whisper = resource(AppResourceLocator.whisperModelRelativePath)
+        let managedStore = ManagedModelStore(
+            supportDirectory: support,
+            documentsDirectory: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true)
+        )
         return [
             .init(id: "sherpa", displayName: "Sherpa", location: resource(AppResourceLocator.sherpaModelRelativePath), requiredFiles: ["encoder*", "decoder*", "joiner*", "tokens.txt"], affectedCapability: "实时转写", version: "2023-06-26"),
             .init(id: "vad", displayName: "Silero VAD", location: resource(AppResourceLocator.vadModelRelativePath), requiredFiles: [], affectedCapability: "语音分段", version: "Silero", locationKind: .file),
-            .init(id: "whisperkit", displayName: "WhisperKit", location: whisper, requiredFiles: ["config.json"], affectedCapability: "本地精校与音频导入", version: WhisperKitService.defaultModel),
-            .init(id: "speakerkit", displayName: "SpeakerKit", location: support.appendingPathComponent("Models/SpeakerKit", isDirectory: true), requiredFiles: ["segmentation*", "embedding*"], affectedCapability: "说话人分离")
+            .init(id: "whisperkit", displayName: "WhisperKit", location: managedStore.repositoryDirectory(for: .whisperKit), requiredFiles: [], affectedCapability: "本地精校与音频导入", version: WhisperKitService.defaultModel, validationKind: .whisperKit),
+            .init(id: "speakerkit", displayName: "SpeakerKit", location: managedStore.repositoryDirectory(for: .speakerKit), requiredFiles: [], affectedCapability: "说话人分离", validationKind: .speakerKit)
         ]
     }
 }

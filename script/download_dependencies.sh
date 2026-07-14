@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHERPA_LIB_DIR="$ROOT_DIR/Libraries/sherpa-onnx/lib"
 APP_SUPPORT_MODEL_ROOT="$HOME/Library/Application Support/HySimulatranslate/Models"
 SHERPA_MODEL_SOURCE="${SHERPA_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/Sherpa/sherpa-onnx-streaming-zipformer-en-2023-06-26}"
-WHISPER_MODEL_SOURCE="${WHISPER_MODEL_SOURCE:-$HOME/Library/Application Support/HySimulatranslate/Models/WhisperKit/openai_whisper-large-v3}"
+WHISPER_DOWNLOAD_BASE="${WHISPER_DOWNLOAD_BASE:-$APP_SUPPORT_MODEL_ROOT/WhisperKit}"
+WHISPER_MODEL_SOURCE="${WHISPER_MODEL_SOURCE:-$WHISPER_DOWNLOAD_BASE/models/argmaxinc/whisperkit-coreml/openai_whisper-large-v3-v20240930_626MB}"
 VAD_MODEL_SOURCE="${VAD_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/VAD/silero_vad.onnx}"
 
 SHERPA_NPM_VERSION="${SHERPA_NPM_VERSION:-1.13.2}"
@@ -86,7 +87,7 @@ ensure_whisper_model() {
   fi
 
   echo "Downloading WhisperKit large-v3 model..."
-  (cd "$ROOT_DIR" && swift run DependencyDownloader --whisper "$WHISPER_MODEL_SOURCE")
+  (cd "$ROOT_DIR" && swift run DependencyDownloader --whisper-download-base "$WHISPER_DOWNLOAD_BASE")
 }
 
 ensure_vad_model() {

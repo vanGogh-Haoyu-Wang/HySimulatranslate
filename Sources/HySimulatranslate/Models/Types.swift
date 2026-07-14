@@ -43,7 +43,7 @@ enum NoteFileFormat: String, CaseIterable, Identifiable, Codable, Sendable {
 enum WorkspaceMode: Equatable {
     case transcription
     case courseSelection
-    case notePreview(NoteRecord)
+    case audioImport
     case settings
 }
 

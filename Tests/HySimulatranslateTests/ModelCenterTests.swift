@@ -76,6 +76,78 @@ final class ModelCenterTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
     }
 
+    func testLegacyMigrationCopyFallbackValidatesBeforeRemovingSource() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ManagedModelStore(
+            supportDirectory: root.appendingPathComponent("support", isDirectory: true),
+            documentsDirectory: root.appendingPathComponent("documents", isDirectory: true),
+            migrationMovePolicy: .copyOnly
+        )
+        let source = store.legacyRepositoryDirectory(for: .speakerKit)
+        try makeSpeakerKitFixture(at: source)
+
+        try store.migrateLegacyRepositoriesIfNeeded()
+
+        XCTAssertEqual(store.validationReport(for: .speakerKit).state, .ready)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    func testStandardResourcesUseManagedHubRepositoryLocations() throws {
+        let support = URL(fileURLWithPath: "/tmp/hysimulatranslate-model-test", isDirectory: true)
+        let store = ManagedModelStore(
+            supportDirectory: support,
+            documentsDirectory: URL(fileURLWithPath: "/tmp/documents", isDirectory: true)
+        )
+        let resources = ModelResourceService.standardResources(support: support)
+
+        XCTAssertEqual(
+            resources.first(where: { $0.id == "whisperkit" })?.location,
+            store.repositoryDirectory(for: .whisperKit)
+        )
+        XCTAssertEqual(
+            resources.first(where: { $0.id == "speakerkit" })?.location,
+            store.repositoryDirectory(for: .speakerKit)
+        )
+        XCTAssertEqual(store.downloadBase(for: .whisperKit).lastPathComponent, "WhisperKit")
+        XCTAssertEqual(store.downloadBase(for: .speakerKit).lastPathComponent, "SpeakerKit")
+    }
+
+    @MainActor func testModelCenterMigratesValidLegacyModelBeforeOfferingDownload() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let support = root.appendingPathComponent("support", isDirectory: true)
+        let documents = root.appendingPathComponent("documents", isDirectory: true)
+        let store = ManagedModelStore(supportDirectory: support, documentsDirectory: documents)
+        let legacy = store.legacyRepositoryDirectory(for: .whisperKit)
+        try makeWhisperKitFixture(at: legacy.appendingPathComponent("openai_whisper-large-v3-v20240930_626MB", isDirectory: true))
+        let resource = ModelResourceDefinition(id: "whisperkit", displayName: "WhisperKit", location: store.repositoryDirectory(for: .whisperKit), requiredFiles: [], affectedCapability: "精校", validationKind: .whisperKit)
+        let service = ModelResourceService(resources: [resource], managedModelStore: store)
+
+        let vm = ModelCenterViewModel(resourceService: service, providerKeys: { [:] })
+
+        XCTAssertEqual(vm.localResources.first?.state, .ready)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
+    @MainActor func testDownloadIntegrityFailureNamesMissingComponentsAndPath() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("whisperkit-coreml", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        let service = ModelResourceService(resources: [
+            .init(id: "whisperkit", displayName: "WhisperKit", location: repository, requiredFiles: [], affectedCapability: "精校", validationKind: .whisperKit)
+        ])
+        let vm = ModelCenterViewModel(resourceService: service, providerKeys: { [:] }, installer: { _, _ in
+            repository
+        })
+
+        await vm.download(resourceID: "whisperkit")
+
+        XCTAssertTrue(vm.lastError?.contains("MelSpectrogram.mlmodelc") == true)
+        XCTAssertTrue(vm.lastError?.contains(repository.path) == true)
+    }
+
     func testModelListScopeStorageDefaultsToRecommendedAndRoundTripsAll() {
         XCTAssertEqual(ModelListScope(storageValue: nil), .recommended)
         XCTAssertEqual(ModelListScope(storageValue: "invalid"), .recommended)
@@ -113,6 +185,7 @@ final class ModelCenterTests: XCTestCase {
             if attempts == 1 { throw TestError.expected }
             try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
             try Data([1]).write(to: model.appendingPathComponent("tokens.txt"))
+            return model
         }
         XCTAssertEqual(vm.localResources.first?.state, .missing)
         await vm.refreshCloud()

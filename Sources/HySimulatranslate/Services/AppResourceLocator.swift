@@ -5,10 +5,10 @@ enum AppResourceLocator {
     static let payloadDirectoryName = "HySimulatranslatePayload"
     static let supportDirectoryEnvironmentKey = "HYSIMULATRANSLATE_SUPPORT_DIR"
     static let sherpaModelFolderName = "sherpa-onnx-streaming-zipformer-en-2023-06-26"
-    static let whisperModelFolderName = "openai_whisper-large-v3"
+    static let whisperModelFolderName = "openai_whisper-large-v3-v20240930_626MB"
     static let vadModelFileName = "silero_vad.onnx"
     static let sherpaModelRelativePath = "Models/Sherpa/\(sherpaModelFolderName)"
-    static let whisperModelRelativePath = "Models/WhisperKit/\(whisperModelFolderName)"
+    static let whisperModelRelativePath = "Models/WhisperKit/models/argmaxinc/whisperkit-coreml"
     static let vadModelRelativePath = "Models/VAD/\(vadModelFileName)"
 
     static func defaultSupportDirectory(
@@ -89,6 +89,12 @@ enum AppResourceLocator {
         if let bundledPayloadDirectory {
             roots.append(bundledPayloadDirectory.appendingRelativePath(whisperModelRelativePath))
         }
+
+        roots.append(
+            supportDirectory
+                .appendingPathComponent("Models/WhisperKit", isDirectory: true)
+                .appendingPathComponent(whisperModelFolderName, isDirectory: true)
+        )
 
         roots.append(contentsOf: legacyWhisperCacheSearchRoots(environment: environment))
         return roots.removingDuplicatesByStandardizedPath()

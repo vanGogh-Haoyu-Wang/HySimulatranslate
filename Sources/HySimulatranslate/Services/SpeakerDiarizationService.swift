@@ -7,19 +7,47 @@ actor SpeakerDiarizationService {
     private var isReady = false
     private var isDiarizing = false
     private var labelMapper = SpeakerLabelMapper()
+    private let managedModelStore: ManagedModelStore
+
+    init(managedModelStore: ManagedModelStore = .standard) {
+        self.managedModelStore = managedModelStore
+    }
 
     func configure(allowDownload: Bool = true) async -> Bool {
-        if isReady, speakerKit != nil { return true }
         do {
-            let config = PyannoteConfig(download: allowDownload, load: false, verbose: false)
-            speakerKit = try await SpeakerKit(config)
-            isReady = true
+            _ = try await prepareModel(allowDownload: allowDownload)
             return true
         } catch {
             speakerKit = nil
             isReady = false
             return false
         }
+    }
+
+    func prepareModel(allowDownload: Bool = true) async throws -> URL {
+        let repository = managedModelStore.repositoryDirectory(for: .speakerKit)
+        if isReady, speakerKit != nil { return repository }
+        try managedModelStore.migrateLegacyRepositoriesIfNeeded()
+        if !allowDownload, managedModelStore.validationReport(for: .speakerKit).state != .ready {
+            throw ModelResourceError.resourceMissing
+        }
+
+        let downloadBase = managedModelStore.downloadBase(for: .speakerKit)
+        try FileManager.default.createDirectory(at: downloadBase, withIntermediateDirectories: true)
+        let config = PyannoteConfig(
+            downloadBase: downloadBase.path,
+            download: allowDownload,
+            load: false,
+            verbose: false
+        )
+        speakerKit = try await SpeakerKit(config)
+        let report = managedModelStore.validationReport(for: .speakerKit)
+        guard report.state == .ready else {
+            speakerKit = nil
+            throw ManagedModelStoreError.modelIntegrityFailed(report)
+        }
+        isReady = true
+        return repository
     }
 
     func resetSession() {

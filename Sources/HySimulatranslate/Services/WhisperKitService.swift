@@ -16,13 +16,16 @@ actor WhisperKitService {
     private var modelFolder: URL?
     private let model: String
     private let modelSearchRoots: [URL]?
+    private let managedModelStore: ManagedModelStore
 
     init(
         model: String = WhisperKitService.defaultModel,
-        modelSearchRoots: [URL]? = nil
+        modelSearchRoots: [URL]? = nil,
+        managedModelStore: ManagedModelStore = .standard
     ) {
         self.model = model
         self.modelSearchRoots = modelSearchRoots
+        self.managedModelStore = managedModelStore
     }
 
     typealias ProgressHandler = @Sendable (Double, String) -> Void
@@ -33,46 +36,59 @@ actor WhisperKitService {
         allowDownload: Bool = false,
         onProgress: (@Sendable (Double, String) -> Void)? = nil
     ) async -> Bool {
-        if isConfigured { return true }
         do {
-            // 第一步：下载模型（如果已缓存则跳过）
-            onProgress?(0.0, "检查模型缓存...")
-
-            let modelFolder: URL
-            let cached = findCachedModel()
-            if let cached {
-                modelFolder = cached
-                onProgress?(1.0, "本地灾备模型缓存可用")
-            } else {
-                guard allowDownload else {
-                    onProgress?(0.0, "WhisperKit 模型未缓存，使用 Sherpa 快速模式")
-                    print("[WhisperKitService] No cached model for '\(model)'; skipping download during self-check")
-                    return false
-                }
-                onProgress?(0.05, "正在下载模型 (~626MB，仅首次)...")
-                modelFolder = try await WhisperKit.download(
-                    variant: model,
-                    progressCallback: { progress in
-                        let fraction = progress.fractionCompleted
-                        let status = fraction > 0.01
-                            ? String(format: "下载中 %.0f%%...", fraction * 100)
-                            : "连接 HuggingFace..."
-                        onProgress?(max(0.05, fraction * 0.90), status)
-                    }
-                )
-                onProgress?(0.92, "下载完成，准备按需加载...")
-            }
-
-            self.modelFolder = modelFolder
-            self.isConfigured = true
-            onProgress?(1.0, "本地灾备模型已就绪（按需加载）")
-            print("[WhisperKitService] Model '\(model)' available for lazy fallback")
+            _ = try await prepareModel(allowDownload: allowDownload, onProgress: onProgress)
             return true
         } catch {
             onProgress?(0.0, "加载失败: \(error.localizedDescription)")
             print("[WhisperKitService] Failed: \(error.localizedDescription)")
             return false
         }
+    }
+
+    func prepareModel(
+        allowDownload: Bool = false,
+        onProgress: (@Sendable (Double, String) -> Void)? = nil
+    ) async throws -> URL {
+        if isConfigured, let modelFolder { return modelFolder }
+        try managedModelStore.migrateLegacyRepositoriesIfNeeded()
+        onProgress?(0.0, "检查模型缓存...")
+
+        let preparedFolder: URL
+        if let cached = findCachedModel() {
+            preparedFolder = cached
+            onProgress?(1.0, "本地灾备模型缓存可用")
+        } else {
+            guard allowDownload else {
+                onProgress?(0.0, "WhisperKit 模型未缓存，使用 Sherpa 快速模式")
+                throw ModelResourceError.resourceMissing
+            }
+            let downloadBase = managedModelStore.downloadBase(for: .whisperKit)
+            try FileManager.default.createDirectory(at: downloadBase, withIntermediateDirectories: true)
+            onProgress?(0.05, "正在下载模型 (~626MB，仅首次)...")
+            preparedFolder = try await WhisperKit.download(
+                variant: model,
+                downloadBase: downloadBase,
+                progressCallback: { progress in
+                    let fraction = progress.fractionCompleted
+                    let status = fraction > 0.01
+                        ? String(format: "下载中 %.0f%%...", fraction * 100)
+                        : "连接 HuggingFace..."
+                    onProgress?(max(0.05, fraction * 0.90), status)
+                }
+            )
+            onProgress?(0.92, "下载完成，正在校验...")
+        }
+
+        let report = ManagedModelStore.validationReport(at: preparedFolder, kind: .whisperKit)
+        guard report.state == .ready else {
+            throw ManagedModelStoreError.modelIntegrityFailed(report)
+        }
+        modelFolder = preparedFolder
+        isConfigured = true
+        onProgress?(1.0, "本地灾备模型已就绪（按需加载）")
+        print("[WhisperKitService] Model '\(model)' available for lazy fallback at \(preparedFolder.path)")
+        return preparedFolder
     }
 
     // MARK: - 转录
@@ -110,8 +126,9 @@ actor WhisperKitService {
     // MARK: - 缓存检查
 
     private func findCachedModel() -> URL? {
-        Self.findCachedModel(
-            in: modelSearchRoots ?? Self.defaultCacheSearchRoots(),
+        let roots = modelSearchRoots ?? [managedModelStore.repositoryDirectory(for: .whisperKit)] + Self.defaultCacheSearchRoots()
+        return Self.findCachedModel(
+            in: roots,
             model: model
         )
     }
@@ -199,23 +216,7 @@ actor WhisperKitService {
     }
 
     nonisolated private static func hasRequiredModelComponents(in folder: URL) -> Bool {
-        ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy {
-            hasModelComponent(named: $0, in: folder)
-        }
-    }
-
-    nonisolated private static func hasModelComponent(named name: String, in folder: URL) -> Bool {
-        let compiled = folder.appendingPathComponent("\(name).mlmodelc")
-        if FileManager.default.fileExists(atPath: compiled.path) { return true }
-
-        let package = folder.appendingPathComponent("\(name).mlpackage")
-        if FileManager.default.fileExists(atPath: package.path) { return true }
-
-        let packageModel = package
-            .appendingPathComponent("Data")
-            .appendingPathComponent("com.apple.CoreML")
-            .appendingPathComponent("model.mlmodel")
-        return FileManager.default.fileExists(atPath: packageModel.path)
+        ManagedModelStore.isWhisperVariantDirectory(folder)
     }
 
     // MARK: - 质量检查（与 Python 完全一致）
