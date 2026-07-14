@@ -42,24 +42,31 @@ actor AgnesHistoryOrganizerService {
             return LLMProviderCheckResult(provider: provider, status: .notConfigured)
         }
 
-        let result = await requestChatCompletion(
-            credential: credential,
-            systemRole: "You are a concise connectivity tester.",
-            prompt: "Reply with exactly: ok",
-            temperature: 0.0,
-            maxTokens: 8,
-            timeout: min(credential.provider.timeout, 8.0)
-        )
-        switch result {
-        case .success(let content):
-            let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        do {
+            let models = try await LLMModelDiscoveryService().fetchTextModels(
+                for: .agnes,
+                apiKey: credential.apiKey
+            )
             return LLMProviderCheckResult(
                 provider: credential.provider,
-                status: normalized.contains("ok") ? .passed : .failed("空响应")
+                status: Self.connectivityStatus(
+                    availableModelIDs: models.map(\.id),
+                    selectedModelID: credential.provider.modelName
+                )
             )
-        case .failure(let reason):
-            return LLMProviderCheckResult(provider: credential.provider, status: .failed(reason))
+        } catch {
+            return LLMProviderCheckResult(
+                provider: credential.provider,
+                status: .failed(error.localizedDescription)
+            )
         }
+    }
+
+    static func connectivityStatus(
+        availableModelIDs: [String],
+        selectedModelID: String
+    ) -> LLMProviderCheckStatus {
+        availableModelIDs.contains(selectedModelID) ? .passed : .failed("模型不可用")
     }
 
     func organizeHistory(

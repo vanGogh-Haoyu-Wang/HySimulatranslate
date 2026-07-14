@@ -1,6 +1,44 @@
 import XCTest
 @testable import HySimulatranslate
 
+private actor StubAppleSystemTranslator: AppleSystemTranslating {
+    private let prepareResult: Bool
+    private let translationResult: String?
+    private var translatedTexts: [String] = []
+
+    init(prepareResult: Bool = true, translationResult: String?) {
+        self.prepareResult = prepareResult
+        self.translationResult = translationResult
+    }
+
+    func prepare() async -> Bool {
+        prepareResult
+    }
+
+    func translate(_ text: String) async -> String? {
+        translatedTexts.append(text)
+        return translationResult
+    }
+
+    func receivedTexts() -> [String] {
+        translatedTexts
+    }
+}
+
+private actor ConcurrentCallProbe {
+    private var activeCount = 0
+    private(set) var maximumActiveCount = 0
+
+    func enter() {
+        activeCount += 1
+        maximumActiveCount = max(maximumActiveCount, activeCount)
+    }
+
+    func leave() {
+        activeCount -= 1
+    }
+}
+
 final class HySimulatranslateTests: XCTestCase {
     private var temporaryDirectories: [URL] = []
 
@@ -814,6 +852,23 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(agnes.acceptsKey("sk-test-key"))
     }
 
+    func testAgnesConnectivityAcceptsAuthenticatedModelListing() {
+        XCTAssertEqual(
+            AgnesHistoryOrganizerService.connectivityStatus(
+                availableModelIDs: ["agnes-1.5-flash", "agnes-2.0-flash"],
+                selectedModelID: "agnes-2.0-flash"
+            ),
+            .passed
+        )
+        XCTAssertEqual(
+            AgnesHistoryOrganizerService.connectivityStatus(
+                availableModelIDs: ["agnes-1.5-flash"],
+                selectedModelID: "agnes-2.0-flash"
+            ),
+            .failed("模型不可用")
+        )
+    }
+
     func testLLMProviderCredentialsKeepGroqCoreSeparateFromNvidiaSummary() {
         let keys: [LLMProviderID: String] = [
             .groq: "gsk_test_key",
@@ -922,22 +977,54 @@ final class HySimulatranslateTests: XCTestCase {
         )
     }
 
-    func testFreeModelFilteringKeepsOnlySupportedChatModels() {
-        let groq = LLMProviderCatalog.freeModels(
+    func testTextModelFilteringRejectsExplicitNonTextModelsAndKeepsUnknownCandidates() {
+        let groq = LLMProviderCatalog.textModels(
             for: .groq,
-            modelIDs: ["llama-3.3-70b-versatile", "whisper-large-v3", "openai/gpt-oss-120b"]
-        )
-        let nvidia = LLMProviderCatalog.freeModels(
-            for: .nvidia,
             modelIDs: [
-                "nvidia/llama-3.3-nemotron-super-49b-v1",
-                "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-                "nvidia/parakeet-tdt-0.6b-v2"
+                "llama-3.3-70b-versatile",
+                "whisper-large-v3",
+                "acme/text-next",
+                "acme/code-next",
+                "acme/embedding-v2",
+                "acme/video-gen",
+                "canopylabs/orpheus-v1-english",
+                "openai/gpt-oss-safeguard-20b"
             ]
         )
 
-        XCTAssertEqual(groq.map(\.id), ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
-        XCTAssertEqual(nvidia.map(\.id), ["nvidia/llama-3.3-nemotron-super-49b-v1"])
+        XCTAssertEqual(
+            Set(groq.map(\.id)),
+            Set(["llama-3.3-70b-versatile", "acme/text-next", "acme/code-next"])
+        )
+        XCTAssertEqual(groq.first(where: { $0.id == "llama-3.3-70b-versatile" })?.freeStatus, .free)
+        XCTAssertEqual(groq.first(where: { $0.id == "acme/text-next" })?.freeStatus, .unknown)
+        XCTAssertEqual(LLMProviderModelFreeStatus.free.displayText, "免费")
+        XCTAssertEqual(LLMProviderModelFreeStatus.unknown.displayText, "资费未知")
+        XCTAssertNil(
+            LLMProviderCatalog.model(
+                for: .groq,
+                modelID: "canopylabs/orpheus-v1-english",
+                preserveUnknown: true
+            )
+        )
+    }
+
+    func testAgnesTextModelFilteringKeepsNewTextModelsAndRejectsImageAndVideoModels() {
+        let models = LLMProviderCatalog.textModels(
+            for: .agnes,
+            modelIDs: [
+                "agnes-1.5-flash",
+                "agnes-2.0-flash",
+                "agnes-video-v2.0",
+                "agnes-image-2.1-flash"
+            ]
+        )
+
+        XCTAssertEqual(Set(models.map(\.id)), Set(["agnes-1.5-flash", "agnes-2.0-flash"]))
+        XCTAssertEqual(models.first(where: { $0.id == "agnes-1.5-flash" })?.freeStatus, .unknown)
+        XCTAssertEqual(models.first(where: { $0.id == "agnes-2.0-flash" })?.freeStatus, .free)
+        XCTAssertTrue(LLMProviderCatalog.isRecommended(providerID: .agnes, modelID: "agnes-2.0-flash"))
+        XCTAssertFalse(LLMProviderCatalog.isRecommended(providerID: .agnes, modelID: "agnes-1.5-flash"))
     }
 
     func testAgnesHistoryOrganizerValidationRejectsMissingIDsAndExpansions() {
@@ -1141,6 +1228,159 @@ final class HySimulatranslateTests: XCTestCase {
             TranslationService.translationUnits(for: text),
             ["First sentence.", "Second sentence.", "Third sentence."]
         )
+    }
+
+    func testTranslationExecutionModePrefersOnlineThenAppleOffline() {
+        XCTAssertEqual(
+            TranslationExecutionMode.resolve(apiReady: true, appleReady: true),
+            .online
+        )
+        XCTAssertEqual(
+            TranslationExecutionMode.resolve(apiReady: false, appleReady: true),
+            .appleOffline
+        )
+        XCTAssertEqual(
+            TranslationExecutionMode.resolve(apiReady: false, appleReady: false),
+            .unavailable
+        )
+    }
+
+    func testTranslationExecutionModeUsesDistinctStatusTitles() {
+        XCTAssertEqual(TranslationExecutionMode.online.statusTitle, "在线同传")
+        XCTAssertEqual(TranslationExecutionMode.appleOffline.statusTitle, "Apple 离线同传")
+        XCTAssertEqual(TranslationExecutionMode.unavailable.statusTitle, "本地转录")
+    }
+
+    func testOnlineTranslationFailureRecognizesMultipleTimedOutUnits() {
+        XCTAssertTrue(TranslationService.isCompleteTranslationFailure("[翻译超时]"))
+        XCTAssertTrue(
+            TranslationService.isCompleteTranslationFailure(
+                "[翻译超时]\n[翻译超时]"
+            )
+        )
+        XCTAssertFalse(
+            TranslationService.isCompleteTranslationFailure(
+                "有效译文\n[翻译超时]"
+            )
+        )
+    }
+
+    func testAppleTranslationRequestGateSerializesConcurrentCalls() async {
+        let gate = AppleTranslationRequestGate()
+        let probe = ConcurrentCallProbe()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    await gate.acquire()
+                    await probe.enter()
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                    await probe.leave()
+                    await gate.release()
+                }
+            }
+        }
+
+        let maximumActiveCount = await probe.maximumActiveCount
+        XCTAssertEqual(maximumActiveCount, 1)
+    }
+
+    func testAppleTranslationNormalizesTraditionalChineseToSimplified() {
+        XCTAssertEqual(
+            AppleTranslationTextNormalizer.simplifiedChinese(
+                "一個好的研究問題應該有重點和答案。"
+            ),
+            "一个好的研究问题应该有重点和答案。"
+        )
+    }
+
+    func testOfflineFormalTranslationUsesAppleForWhisperSentence() async {
+        let translator = StubAppleSystemTranslator(
+            translationResult: "這是 Whisper 精校後的句子。"
+        )
+        let service = TranslationService(appleTranslator: translator)
+        let uid = UUID()
+        let resultExpectation = expectation(description: "Apple formal translation")
+        await service.configure { resultUID, text in
+            XCTAssertEqual(resultUID, uid)
+            XCTAssertEqual(text, "这是 Whisper 精校后的句子。")
+            resultExpectation.fulfill()
+        }
+
+        await service.translate(
+            uid: uid,
+            englishText: "This is the Whisper-refined sentence.",
+            groqCredential: nil,
+            mode: .appleOffline
+        )
+
+        await fulfillment(of: [resultExpectation], timeout: 1)
+        let receivedTexts = await translator.receivedTexts()
+        XCTAssertEqual(receivedTexts, ["This is the Whisper-refined sentence."])
+    }
+
+    @MainActor
+    func testSherpaDraftAppleTranslationRemainsDisplayOnly() async {
+        let translator = StubAppleSystemTranslator(
+            translationResult: "项目规划需要明确的研究问题。"
+        )
+        let vm = TranscriptionViewModel(appleTranslationService: translator)
+        await vm.prepareAppleTranslationForTesting()
+        vm.isRecording = true
+        vm.translationEnabled = true
+
+        vm.updateSherpaDraftForTesting(
+            "Project planning requires clear research questions."
+        )
+        try? await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(vm.draftAppleTranslation, "项目规划需要明确的研究问题。")
+        XCTAssertTrue(vm.historyItems.isEmpty)
+        XCTAssertTrue(vm.dynamicItems.isEmpty)
+    }
+
+    @MainActor
+    func testSherpaSegmentApplePreviewIsRemovedWhenItemMovesToHistory() async {
+        let translator = StubAppleSystemTranslator(
+            translationResult: "这是 Sherpa 临时译文。"
+        )
+        let vm = TranscriptionViewModel(appleTranslationService: translator)
+        await vm.prepareAppleTranslationForTesting()
+        vm.translationEnabled = true
+        let uid = UUID()
+
+        vm.enqueueWhisperItemForTesting(
+            uid: uid,
+            pcm: Data(repeating: 1, count: 64_000),
+            sherpaText: "This is a meaningful Sherpa preview sentence."
+        )
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(vm.appleRealtimeTranslations[uid], "这是 Sherpa 临时译文。")
+        XCTAssertNil(vm.dynamicItems.first?.chinese)
+
+        let now = Date().timeIntervalSince1970 + 3
+        vm.dynamicItems[0].status = .done
+        vm.dynamicItems[0].doneTime = now - 3
+        vm.flushDynamicItemsForIdleInput(now: now)
+
+        XCTAssertEqual(vm.historyItems.first?.id, uid)
+        XCTAssertNil(vm.historyItems.first?.chinese)
+        XCTAssertNil(vm.appleRealtimeTranslations[uid])
+    }
+
+    @MainActor
+    func testAppleOfflineReadinessEnablesFormalTranslationWithoutAPI() {
+        let vm = TranscriptionViewModel()
+
+        vm.applyTranslationReadinessForTesting(
+            apiReady: false,
+            appleReady: true
+        )
+
+        XCTAssertEqual(vm.translationExecutionMode, .appleOffline)
+        XCTAssertTrue(vm.translationEnabled)
+        XCTAssertTrue(vm.appleTranslationReady)
     }
 
     func testTranscriptOrganizerMergesAdjacentTokenOverlap() {
@@ -1535,6 +1775,7 @@ final class HySimulatranslateTests: XCTestCase {
     @MainActor
     func testStartGateRequiresMicrophoneSherpaAndWhisperButAllowsOfflineAPI() {
         let vm = TranscriptionViewModel()
+        vm.applyMeetingLibraryReadinessForTesting(true, message: "")
         vm.engineStatus = .ready("ready")
         vm.microphoneReady = true
         vm.sherpaReady = true
@@ -1576,6 +1817,7 @@ final class HySimulatranslateTests: XCTestCase {
     @MainActor
     func testStartGateSupportsMicrophoneOnlySystemOnlyAndCombinedInputs() {
         let vm = TranscriptionViewModel()
+        vm.applyMeetingLibraryReadinessForTesting(true, message: "")
         vm.engineStatus = .ready("ready")
         vm.sherpaReady = true
         vm.whisperReady = true
@@ -1684,6 +1926,24 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
+    func testSelfCheckSummaryReportsAppleSystemTranslationReadiness() {
+        let vm = TranscriptionViewModel()
+
+        vm.publishSelfCheckSummary(
+            microphone: true,
+            sherpa: true,
+            whisper: true,
+            appleTranslation: true,
+            providerResults: []
+        )
+
+        XCTAssertTrue(
+            vm.historyItems.map(\.english)
+                .contains("[自检] Apple 系统翻译: 通过")
+        )
+    }
+
+    @MainActor
     func testAudioInputChangeRequiresOnlyAudioCheckAndPreservesModelReadiness() {
         let vm = TranscriptionViewModel()
         let providerResult = LLMProviderCheckResult(
@@ -1739,6 +1999,7 @@ final class HySimulatranslateTests: XCTestCase {
     @MainActor
     func testClosingFailedSystemAudioInputRestoresStartGateWhenMicrophoneIsReady() {
         let vm = TranscriptionViewModel()
+        vm.applyMeetingLibraryReadinessForTesting(true, message: "")
         vm.engineStatus = .ready("ready")
         vm.sherpaReady = true
         vm.whisperReady = true
@@ -1794,6 +2055,24 @@ final class HySimulatranslateTests: XCTestCase {
             XCTAssertTrue(script.contains("record your local speech"))
             XCTAssertTrue(script.contains("screen and system audio recording access"))
         }
+    }
+
+    func testDynamicPanelRendersApplePreviewSeparatelyFromFormalTranslation() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot
+                .appendingPathComponent(
+                    "Sources/HySimulatranslate/Views/TranscriptionView.swift"
+                ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("vm.draftAppleTranslation"))
+        XCTAssertTrue(source.contains("vm.appleRealtimeTranslations[item.id]"))
+        XCTAssertTrue(source.contains("apple.logo"))
     }
 
     @MainActor
@@ -2068,6 +2347,7 @@ final class HySimulatranslateTests: XCTestCase {
     @MainActor
     func testStartNewRecordClearsDisplayButKeepsReadinessAndProviderResults() {
         let vm = TranscriptionViewModel()
+        vm.applyMeetingLibraryReadinessForTesting(true, message: "")
         let result = LLMProviderCheckResult(
             provider: LLMProviderCatalog.groqCoreProvider!,
             status: .passed
@@ -2216,19 +2496,16 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(vm.liveSummaryStatus, "已写入笔记")
     }
 
-    func testVADAndDenoiserResourcesPreferApplicationSupportFiles() throws {
+    func testVADResourcePrefersApplicationSupportFile() throws {
         let root = try makeTemporaryDirectory()
         let support = root.appendingPathComponent("Support")
         let payload = root
             .appendingPathComponent("Bundle")
             .appendingPathComponent(AppResourceLocator.payloadDirectoryName)
         let supportVAD = support.appendingPathComponent(AppResourceLocator.vadModelRelativePath)
-        let payloadDenoiser = payload.appendingPathComponent(AppResourceLocator.speechDenoiserModelRelativePath)
 
         try FileManager.default.createDirectory(at: supportVAD.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: payloadDenoiser.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("vad".utf8).write(to: supportVAD)
-        try Data("denoiser".utf8).write(to: payloadDenoiser)
 
         XCTAssertEqual(
             AppResourceLocator.vadModelFile(
@@ -2237,13 +2514,46 @@ final class HySimulatranslateTests: XCTestCase {
             )?.standardizedFileURL.path,
             supportVAD.standardizedFileURL.path
         )
-        XCTAssertEqual(
-            AppResourceLocator.speechDenoiserModelFile(
-                supportDirectory: support,
-                bundledPayloadDirectory: payload
-            )?.standardizedFileURL.path,
-            payloadDenoiser.standardizedFileURL.path
-        )
+    }
+
+    func testProjectNoLongerShipsOrReferencesLocalDenoiser() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let removedService = packageRoot
+            .appendingPathComponent("Sources/HySimulatranslate/Services/SpeechDenoiserService.swift")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: removedService.path))
+
+        let auditedFiles = [
+            "Sources/HySimulatranslate/Services/AppResourceLocator.swift",
+            "Sources/HySimulatranslate/Services/ResourceDownloadService.swift",
+            "Sources/HySimulatranslate/ViewModels/TranscriptionViewModel.swift",
+            "Sources/HySimulatranslate/Models/Types.swift",
+            "script/download_dependencies.sh",
+            "script/package_dmg.sh",
+            "README.md"
+        ]
+        let forbiddenTokens = [
+            "speechdenoiser",
+            "gtcrn",
+            "denoisedpcm",
+            "models/denoise",
+            "denoiser_model"
+        ]
+
+        for relativePath in auditedFiles {
+            let contents = try String(
+                contentsOf: packageRoot.appendingPathComponent(relativePath),
+                encoding: .utf8
+            ).lowercased()
+            for token in forbiddenTokens {
+                XCTAssertFalse(
+                    contents.contains(token),
+                    "\(relativePath) still contains removed local denoiser token '\(token)'"
+                )
+            }
+        }
     }
 
     func testLLMPromptUsesWhisperAsPrimaryAndSherpaAsReference() {

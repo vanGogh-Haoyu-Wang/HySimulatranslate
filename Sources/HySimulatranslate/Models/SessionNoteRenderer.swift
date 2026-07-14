@@ -6,6 +6,7 @@ enum SessionNoteRenderer {
         translationEnabled: Bool,
         items: [TranscriptionItem],
         finalSummary: String,
+        speakerAliases: [String: String] = [:],
         format: NoteFileFormat = .text,
         date: Date = Date()
     ) -> String {
@@ -16,6 +17,7 @@ enum SessionNoteRenderer {
                 translationEnabled: translationEnabled,
                 items: items,
                 finalSummary: finalSummary,
+                speakerAliases: speakerAliases,
                 date: date
             )
         case .text:
@@ -24,6 +26,7 @@ enum SessionNoteRenderer {
                 translationEnabled: translationEnabled,
                 items: items,
                 finalSummary: finalSummary,
+                speakerAliases: speakerAliases,
                 date: date
             )
         }
@@ -34,6 +37,7 @@ enum SessionNoteRenderer {
         translationEnabled: Bool,
         items: [TranscriptionItem],
         finalSummary: String,
+        speakerAliases: [String: String],
         date: Date
     ) -> String {
         var content = """
@@ -54,7 +58,7 @@ enum SessionNoteRenderer {
             if block.canInterleaveLineByLine {
                 for idx in block.englishLines.indices {
                     guard shouldEmit(block.englishLines[idx], emittedEnglishLines: emittedEnglishLines) else { continue }
-                    content += "\(block.englishLines[idx])\n"
+                    content += "\(speakerPrefix(item: item, aliases: speakerAliases))\(block.englishLines[idx])\n"
                     emittedEnglishLines.append(block.englishLines[idx])
                     if translationEnabled {
                         content += "\(block.chineseLines[idx])\n"
@@ -67,7 +71,7 @@ enum SessionNoteRenderer {
                 }
                 guard !linesToEmit.isEmpty else { continue }
                 for englishLine in linesToEmit {
-                    content += "\(englishLine)\n"
+                    content += "\(speakerPrefix(item: item, aliases: speakerAliases))\(englishLine)\n"
                     emittedEnglishLines.append(englishLine)
                 }
                 if translationEnabled, !block.chineseLines.isEmpty {
@@ -91,6 +95,7 @@ enum SessionNoteRenderer {
         translationEnabled: Bool,
         items: [TranscriptionItem],
         finalSummary: String,
+        speakerAliases: [String: String],
         date: Date
     ) -> String {
         var content = """
@@ -112,7 +117,7 @@ enum SessionNoteRenderer {
             if block.canInterleaveLineByLine {
                 for idx in block.englishLines.indices {
                     guard shouldEmit(block.englishLines[idx], emittedEnglishLines: emittedEnglishLines) else { continue }
-                    content += "\(block.englishLines[idx])\n"
+                    content += "\(speakerPrefix(item: item, aliases: speakerAliases))\(block.englishLines[idx])\n"
                     emittedEnglishLines.append(block.englishLines[idx])
                     if translationEnabled {
                         content += "\(block.chineseLines[idx])\n"
@@ -125,7 +130,7 @@ enum SessionNoteRenderer {
                 }
                 guard !linesToEmit.isEmpty else { continue }
                 for englishLine in linesToEmit {
-                    content += "\(englishLine)\n"
+                    content += "\(speakerPrefix(item: item, aliases: speakerAliases))\(englishLine)\n"
                     emittedEnglishLines.append(englishLine)
                 }
                 if translationEnabled, !block.chineseLines.isEmpty {
@@ -154,5 +159,10 @@ enum SessionNoteRenderer {
                 dropLongerCandidateContainingPrior: false
             )
         }
+    }
+
+    private static func speakerPrefix(item: TranscriptionItem, aliases: [String: String]) -> String {
+        guard let speakerID = item.speakerID, let alias = aliases[speakerID]?.trimmingCharacters(in: .whitespacesAndNewlines), !alias.isEmpty else { return "" }
+        return "\(alias): "
     }
 }

@@ -7,11 +7,9 @@ enum AppResourceLocator {
     static let sherpaModelFolderName = "sherpa-onnx-streaming-zipformer-en-2023-06-26"
     static let whisperModelFolderName = "openai_whisper-large-v3"
     static let vadModelFileName = "silero_vad.onnx"
-    static let speechDenoiserModelFileName = "gtcrn_simple.onnx"
     static let sherpaModelRelativePath = "Models/Sherpa/\(sherpaModelFolderName)"
     static let whisperModelRelativePath = "Models/WhisperKit/\(whisperModelFolderName)"
     static let vadModelRelativePath = "Models/VAD/\(vadModelFileName)"
-    static let speechDenoiserModelRelativePath = "Models/Denoise/\(speechDenoiserModelFileName)"
 
     static func defaultSupportDirectory(
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -63,17 +61,6 @@ enum AppResourceLocator {
     ) -> URL? {
         modelFile(
             relativePath: vadModelRelativePath,
-            supportDirectory: supportDirectory,
-            bundledPayloadDirectory: bundledPayloadDirectory
-        )
-    }
-
-    static func speechDenoiserModelFile(
-        supportDirectory: URL = defaultSupportDirectory(),
-        bundledPayloadDirectory: URL? = bundledPayloadDirectory()
-    ) -> URL? {
-        modelFile(
-            relativePath: speechDenoiserModelRelativePath,
             supportDirectory: supportDirectory,
             bundledPayloadDirectory: bundledPayloadDirectory
         )

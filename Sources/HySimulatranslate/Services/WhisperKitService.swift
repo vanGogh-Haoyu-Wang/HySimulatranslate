@@ -78,6 +78,10 @@ actor WhisperKitService {
     // MARK: - 转录
 
     func transcribe(pcmData: Data) async -> String? {
+        await transcribe(pcmData: pcmData, language: nil)
+    }
+
+    func transcribe(pcmData: Data, language: String?) async -> String? {
         guard isConfigured else { return nil }
         if whisperKit == nil {
             guard await loadModelIfNeeded() else { return nil }
@@ -93,7 +97,9 @@ actor WhisperKitService {
         guard !samples.isEmpty else { return nil }
 
         do {
-            let results = try await wk.transcribe(audioArray: samples)
+            let normalizedLanguage = language?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let options = normalizedLanguage.map { DecodingOptions(language: $0, detectLanguage: false) }
+            let results = try await wk.transcribe(audioArray: samples, decodeOptions: options)
             return results.first?.text.trimmingCharacters(in: .whitespaces)
         } catch {
             print("[WhisperKitService] Transcription error: \(error)")

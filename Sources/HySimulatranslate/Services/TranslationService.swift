@@ -8,14 +8,47 @@ actor TranslationService {
     nonisolated static let maxTranslationQueryCharacters = 450
     nonisolated private static let freeTranslateTimeout: TimeInterval = 6
     nonisolated private static let llmTranslateTimeout: TimeInterval = 8
+    private let appleTranslator: any AppleSystemTranslating
     private var onResult: ResultHandler?
+
+    init(appleTranslator: any AppleSystemTranslating = AppleSystemTranslationService()) {
+        self.appleTranslator = appleTranslator
+    }
 
     func configure(onResult: @escaping ResultHandler) { self.onResult = onResult }
 
-    func translate(uid: UUID, englishText: String, groqCredential: LLMProviderCredential?) async {
+    func translate(
+        uid: UUID,
+        englishText: String,
+        groqCredential: LLMProviderCredential?,
+        mode: TranslationExecutionMode = .online
+    ) async {
         guard shouldTranslate(englishText) else { onResult?(uid, ""); return }
-        let result = await robustTranslate(englishText, groqCredential: groqCredential)
+        let result: String
+        switch mode {
+        case .online:
+            let online = await robustTranslate(englishText, groqCredential: groqCredential)
+            if Self.isCompleteTranslationFailure(online),
+               let apple = await appleTranslator.translate(englishText) {
+                result = AppleTranslationTextNormalizer.simplifiedChinese(apple)
+            } else {
+                result = online
+            }
+        case .appleOffline:
+            result = await appleTranslator.translate(englishText)
+                .map(AppleTranslationTextNormalizer.simplifiedChinese)
+                ?? "[翻译超时]"
+        case .unavailable:
+            result = ""
+        }
         onResult?(uid, cleanTranslation(result, original: englishText))
+    }
+
+    nonisolated static func isCompleteTranslationFailure(_ text: String) -> Bool {
+        let units = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return !units.isEmpty && units.allSatisfy { $0 == "[翻译超时]" }
     }
 
     // MARK: - 跳过无意义文本

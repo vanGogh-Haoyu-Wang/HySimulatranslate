@@ -19,6 +19,7 @@ struct TranscriptionView: View {
     @State private var isLeftSidebarCollapsed = false
     @State private var isSummaryPaneCollapsed = false
     @State private var activeNotePreview: NoteRecord?
+    @State private var showingAudioImport = false
 
     private let layoutSpacing: CGFloat = 12
     private let leftRatio: CGFloat = 3
@@ -79,14 +80,6 @@ struct TranscriptionView: View {
         }
     }
 
-    private var sidebarRowBackgroundColor: Color {
-        isDarkSurface ? .white.opacity(0.07) : .black.opacity(0.055)
-    }
-
-    private var sidebarSelectedRowBackgroundColor: Color {
-        Color.accentColor.opacity(isDarkSurface ? 0.24 : 0.20)
-    }
-
     private var titlebarStatusLeadingPadding: CGFloat {
         isLeftSidebarCollapsed
             ? collapsedTitlebarLeadingPadding
@@ -114,10 +107,6 @@ struct TranscriptionView: View {
                 vm.refreshNoteRecords()
             }
         )
-    }
-
-    private var providerModelControlsDisabled: Bool {
-        vm.isRecording || vm.isFinalizingSession || isChecking || vm.isRefreshingProviderModels
     }
 
     private var isChecking: Bool {
@@ -170,7 +159,25 @@ struct TranscriptionView: View {
 
                 HStack(spacing: visibleSpacing) {
                     if !isLeftSidebarCollapsed {
-                        noteHistorySidebar()
+                        MeetingSidebarView(
+                            vm: vm,
+                            onNewRecord: createNewRecord,
+                            onSelectCourses: { workspaceMode = .courseSelection },
+                            onImportAudio: { showingAudioImport = true },
+                            onSelectMeeting: { meeting in
+                                vm.selectMeeting(meeting)
+                                activeNotePreview = nil
+                                workspaceMode = .transcription
+                            },
+                            onSelectNote: { record in
+                                Task {
+                                    await vm.loadNotePreview(record)
+                                    activeNotePreview = record
+                                    isSummaryPaneCollapsed = false
+                                }
+                            },
+                            onOpenSettings: { workspaceMode = .settings }
+                        )
                             .frame(width: leftWidth)
                             .padding(.leading, leftInset)
                             .padding(.top, 38)
@@ -193,6 +200,11 @@ struct TranscriptionView: View {
         .frame(minWidth: 1320, minHeight: 720)
         .sheet(isPresented: $showingAddSubject) {
             AddSubjectView(courseDB: courseDB)
+        }
+        .sheet(isPresented: $showingAudioImport) {
+            ImportWorkspaceView(subjects: courseDB.allSubjects, progress: vm.importProgress) { url, options in
+                await vm.importAudio(from: url, options: options)
+            }
         }
         .confirmationDialog(
             "删除强化专项？",
@@ -256,144 +268,6 @@ struct TranscriptionView: View {
             .foregroundStyle(.secondary.opacity(0.85))
             .help(canReturnToTranscription ? "返回当前同传" : "当前已在同传主界面")
         }
-    }
-
-    private func noteHistorySidebar() -> some View {
-        VStack(spacing: 12) {
-            VStack(spacing: 4) {
-                sidebarActionButton(
-                    title: "新记录",
-                    systemImage: "square.and.pencil",
-                    isDisabled: vm.isRecording || vm.isFinalizingSession,
-                    action: createNewRecord
-                )
-
-                sidebarActionButton(
-                    title: "强化专项",
-                    systemImage: "book.closed",
-                    action: { workspaceMode = .courseSelection }
-                )
-            }
-
-            HStack {
-                Text("记录")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary.opacity(0.72))
-                Spacer()
-                Button("刷新") {
-                    vm.refreshNoteRecords()
-                }
-                .font(.caption.weight(.medium))
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("刷新当前笔记文件夹的笔记文件")
-            }
-            .padding(.horizontal, 4)
-            .padding(.top, 4)
-
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    if vm.noteRecords.isEmpty {
-                        Text("暂无笔记")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 18)
-                    }
-
-                    ForEach(vm.noteRecords) { record in
-                        noteRecordRow(record)
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            Spacer(minLength: 0)
-
-            Button {
-                workspaceMode = .settings
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "gearshape")
-                    Text("设置")
-                    Spacer()
-                }
-                .font(.system(size: 13, weight: .medium))
-                .padding(.vertical, 8)
-                .padding(.horizontal, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.leading, 6)
-        .padding(.trailing, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
-    }
-
-    private func sidebarActionButton(
-        title: String,
-        systemImage: String,
-        isDisabled: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: systemImage)
-                Text(title)
-                Spacer()
-            }
-            .font(.system(size: 13, weight: .medium))
-            .padding(.vertical, 8)
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .foregroundStyle(isDisabled ? .secondary : .primary)
-    }
-
-    private func noteRecordRow(_ record: NoteRecord) -> some View {
-        Button {
-            Task {
-                await vm.loadNotePreview(record)
-                activeNotePreview = record
-                isSummaryPaneCollapsed = false
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Image(systemName: "doc.text")
-                        .foregroundStyle(.secondary)
-                    Text(record.fileName)
-                        .font(.callout.weight(.medium))
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Text("\(formatDate(record.modifiedAt)) · \(formatFileSize(record.fileSize))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                if let preview = record.previewSummary {
-                    Text(preview)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(vm.selectedNoteRecord?.id == record.id ? sidebarSelectedRowBackgroundColor : sidebarRowBackgroundColor)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - 中右合并主框
@@ -802,28 +676,32 @@ struct TranscriptionView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    let visibleItems = vm.historyItems.filter { $0.isVisible && $0.status == .done }
-                    let systemItems = TranslationOnlyHistoryBuilder.systemMessages(from: visibleItems)
-                    let translationOnlyBlocks = vm.translationOnlyHistoryBlocks
-
-                    if visibleItems.isEmpty || (vm.historyDisplayMode == .translationOnly && systemItems.isEmpty && translationOnlyBlocks.isEmpty) {
-                        Text("暂无历史内容")
-                            .font(centerWallFont())
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 18)
-                    }
-
-                    if vm.historyDisplayMode == .translationOnly {
-                        ForEach(systemItems) { item in
-                            historyItemView(item)
-                        }
-                        ForEach(translationOnlyBlocks) { block in
-                            translationOnlyHistoryBlockView(block)
-                        }
+                    if let meeting = vm.selectedMeeting {
+                        TranscriptTimelineView(vm: vm, meeting: meeting)
                     } else {
-                        ForEach(visibleItems) { item in
-                            historyItemView(item)
+                        let visibleItems = vm.historyItems.filter { $0.isVisible && $0.status == .done }
+                        let systemItems = TranslationOnlyHistoryBuilder.systemMessages(from: visibleItems)
+                        let translationOnlyBlocks = vm.translationOnlyHistoryBlocks
+
+                        if visibleItems.isEmpty || (vm.historyDisplayMode == .translationOnly && systemItems.isEmpty && translationOnlyBlocks.isEmpty) {
+                            Text("暂无历史内容")
+                                .font(centerWallFont())
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 18)
+                        }
+
+                        if vm.historyDisplayMode == .translationOnly {
+                            ForEach(systemItems) { item in
+                                historyItemView(item)
+                            }
+                            ForEach(translationOnlyBlocks) { block in
+                                translationOnlyHistoryBlockView(block)
+                            }
+                        } else {
+                            ForEach(visibleItems) { item in
+                                historyItemView(item)
+                            }
                         }
                     }
 
@@ -843,6 +721,22 @@ struct TranscriptionView: View {
     }
 
     private var summaryEnvironmentPanel: some View {
+        Group {
+            if let workspace = vm.summaryWorkspace {
+                SummaryWorkspaceView(
+                    workspace: workspace,
+                    liveSummary: vm.liveSummaryText,
+                    liveStatus: vm.liveSummaryStatus,
+                    isUpdating: vm.isLiveSummaryUpdating,
+                    modelName: vm.nvidiaSummaryModelName
+                )
+            } else {
+                legacySummaryEnvironmentPanel
+            }
+        }
+    }
+
+    private var legacySummaryEnvironmentPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("笔记总结区")
@@ -938,16 +832,25 @@ struct TranscriptionView: View {
                         }
 
                         if !vm.draftText.isEmpty {
-                            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                                Text("🇬🇧")
-                                Text(vm.draftText)
-                                    .font(centerWallFont(weight: .heavy))
-                                    .foregroundStyle(draftBlue)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text("[Listening...]")
-                                    .font(centerWallFont())
-                                    .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                    Text("🇬🇧")
+                                    Text(vm.draftText)
+                                        .font(centerWallFont(weight: .heavy))
+                                        .foregroundStyle(draftBlue)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text("[Listening...]")
+                                        .font(centerWallFont())
+                                        .foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                                if !vm.draftAppleTranslation.isEmpty {
+                                    appleRealtimeTranslationView(
+                                        vm.draftAppleTranslation
+                                    )
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -1223,56 +1126,12 @@ struct TranscriptionView: View {
 
     private var modelSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("模型", systemImage: "cpu")
-                    .font(centerWallFont(weight: .semibold))
-                Spacer()
-                if vm.isRefreshingProviderModels {
-                    ProgressView()
-                        .scaleEffect(0.65)
-                        .frame(width: 16, height: 16)
-                }
-            }
-
-            HStack(spacing: 8) {
-                Button {
-                    vm.refreshProviderModelLists()
-                } label: {
-                    Label("刷新列表", systemImage: "arrow.triangle.2.circlepath")
-                        .font(centerWallFont(weight: .semibold))
-                }
-                .buttonStyle(.borderless)
-                .disabled(providerModelControlsDisabled)
-
-                Button {
-                    vm.runSystemCheck()
-                } label: {
-                    Label("重新自检", systemImage: "arrow.clockwise")
-                        .font(centerWallFont(weight: .semibold))
-                }
-                .buttonStyle(.borderless)
-                .disabled(providerModelControlsDisabled)
-            }
-
-            providerModelPicker(
-                title: "Groq 核心",
-                providerID: .groq,
-                selection: $vm.groqCoreModelName,
-                models: vm.providerModelOptions(for: .groq)
+            Label("模型中心", systemImage: "cpu")
+                .font(centerWallFont(weight: .semibold))
+            ModelCenterView(
+                viewModel: vm.modelCenterViewModel,
+                modelSelectionDisabled: vm.isRecording || vm.isFinalizingSession || isChecking
             )
-            providerModelPicker(
-                title: "NVIDIA 总结",
-                providerID: .nvidia,
-                selection: $vm.nvidiaSummaryModelName,
-                models: vm.providerModelOptions(for: .nvidia)
-            )
-
-            if !vm.providerModelRefreshStatus.isEmpty {
-                Text(vm.providerModelRefreshStatus)
-                    .font(centerWallFont())
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 
@@ -1330,34 +1189,6 @@ struct TranscriptionView: View {
             .font(centerWallFont())
             .labelsHidden()
             .pickerStyle(.segmented)
-        }
-    }
-
-    private func providerModelPicker(
-        title: String,
-        providerID: LLMProviderID,
-        selection: Binding<String>,
-        models: [LLMProviderModel]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .font(centerWallFont(weight: .semibold))
-            Picker(title, selection: selection) {
-                ForEach(models) { model in
-                    Text(vm.providerModelDisplayText(model)).tag(model.id)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .disabled(providerModelControlsDisabled)
-            .onChange(of: selection.wrappedValue) { _, _ in
-                vm.noteProviderModelSelectionChanged()
-            }
-
-            Text(providerStatusText(for: providerID))
-                .font(centerWallFont())
-                .foregroundStyle(providerStatusColor(for: providerID))
-                .lineLimit(1)
         }
     }
 
@@ -1514,10 +1345,26 @@ struct TranscriptionView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            } else if vm.translationEnabled,
+                      let applePreview = vm.appleRealtimeTranslations[item.id] {
+                appleRealtimeTranslationView(applePreview)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 1)
+    }
+
+    private func appleRealtimeTranslationView(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Image(systemName: "apple.logo")
+                .font(centerWallFont())
+            Text(text.replacingOccurrences(of: "\n", with: " "))
+                .font(centerWallFont())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -1601,16 +1448,6 @@ struct TranscriptionView: View {
         normalizeCourseSelection()
     }
 
-    private func formatDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
-    }
-
-    private func formatFileSize(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-    }
 }
 
 private enum AudioInputToggleKind {

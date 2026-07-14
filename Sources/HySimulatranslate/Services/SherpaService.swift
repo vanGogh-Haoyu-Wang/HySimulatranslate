@@ -1,6 +1,37 @@
 import Foundation
 import CSherpaOnnx
 
+struct SherpaSegment: Equatable, Sendable {
+    let id: UUID
+    let pcmData: Data
+    let text: String
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+}
+
+struct SherpaSegmentTimeline: Equatable, Sendable {
+    let sampleRate: Int
+    private(set) var acceptedSampleCount = 0
+    private(set) var segmentStartSample = 0
+
+    mutating func accept(sampleCount: Int) {
+        acceptedSampleCount += max(0, sampleCount)
+    }
+
+    mutating func accept(sampleCount: Int, sampleRate sourceSampleRate: Int) {
+        guard sourceSampleRate > 0 else { return }
+        let normalized = Int((Double(max(0, sampleCount)) * Double(sampleRate) / Double(sourceSampleRate)).rounded())
+        accept(sampleCount: normalized)
+    }
+
+    mutating func finishSegment(retainedOverlapSamples: Int) -> (startTime: TimeInterval, endTime: TimeInterval) {
+        let start = segmentStartSample
+        let end = acceptedSampleCount
+        segmentStartSample = max(start, end - max(0, retainedOverlapSamples))
+        return (Double(start) / Double(sampleRate), Double(end) / Double(sampleRate))
+    }
+}
+
 // MARK: - 🚀 Sherpa-onnx 流式识别引擎（C API 封装，对应 Python sherpa_recognizer）
 
 actor SherpaService {
@@ -16,8 +47,10 @@ actor SherpaService {
     ]
 
     typealias SegmentHandler = @Sendable (UUID, Data, String) -> Void
+    typealias TimedSegmentHandler = @Sendable (SherpaSegment) -> Void
     typealias DraftHandler = @Sendable (String) -> Void
     private var onSegment: SegmentHandler?
+    private var onTimedSegment: TimedSegmentHandler?
     private var onDraft: DraftHandler?
 
     private var audioBuffer = Data()
@@ -27,6 +60,8 @@ actor SherpaService {
     private var isRunning = false
     private var workerTask: Task<Void, Never>?
     private var sfsProducedTextInSegment = false
+    private var segmentTimeline = SherpaSegmentTimeline(sampleRate: 16_000)
+    private var inputResampler: StreamingAudioResampler?
 
     nonisolated static let noTextCutMinimumAudioSec: Double = 2.0
 
@@ -97,6 +132,7 @@ actor SherpaService {
         voiceActivityReady = false
         isConfigured = false
         audioBuffer = Data()
+        inputResampler = nil
     }
 
     // MARK: - 流式 Worker
@@ -110,6 +146,7 @@ actor SherpaService {
             return
         }
         self.onSegment = onSegment
+        self.onTimedSegment = nil
         self.onDraft = onDraft
         self.isRunning = true
 
@@ -118,6 +155,8 @@ actor SherpaService {
         lastAcousticTime = Date()
         lastPartialText = ""
         sfsProducedTextInSegment = false
+        segmentTimeline = SherpaSegmentTimeline(sampleRate: 16_000)
+        inputResampler = nil
         voiceActivityService.reset()
 
         if stream != nil { SherpaOnnxDestroyOnlineStream(stream!) }
@@ -134,6 +173,15 @@ actor SherpaService {
         }
     }
 
+    func startStreaming(
+        onTimedSegment: @escaping TimedSegmentHandler,
+        onDraft: @escaping DraftHandler
+    ) {
+        self.onTimedSegment = onTimedSegment
+        startStreaming(onSegment: { _, _, _ in }, onDraft: onDraft)
+        self.onTimedSegment = onTimedSegment
+    }
+
     func stopStreaming() {
         isRunning = false
         workerTask?.cancel()
@@ -145,22 +193,31 @@ actor SherpaService {
     func acceptWaveform(samples: [Float], sampleRate: Int32) {
         guard isRunning, let s = stream, let _ = recognizer else { return }
 
+        if inputResampler?.sourceRate != Int(sampleRate) {
+            inputResampler = StreamingAudioResampler(sourceRate: Int(sampleRate), targetRate: 16_000)
+        }
+        guard var resampler = inputResampler else { return }
+        let normalizedSamples = resampler.process(samples)
+        inputResampler = resampler
+        guard !normalizedSamples.isEmpty else { return }
+
         let vadDetectedSpeech = voiceActivityReady
-            ? voiceActivityService.acceptWaveform(samples: samples, sampleRate: sampleRate)
+            ? voiceActivityService.acceptWaveform(samples: normalizedSamples, sampleRate: 16_000)
             : nil
-        let rms = sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(max(1, samples.count)))
+        let rms = sqrt(normalizedSamples.reduce(0) { $0 + $1 * $1 } / Float(max(1, normalizedSamples.count)))
         let hasAcousticActivity = vadDetectedSpeech ?? (rms > 0.01)
         if hasAcousticActivity {
             lastAcousticTime = Date()
         }
 
-        let int16Samples = samples.map { Int16(max(-32768, min(32767, $0 * 32768))) }
+        let int16Samples = normalizedSamples.map { Int16(max(-32768, min(32767, $0 * 32768))) }
+        segmentTimeline.accept(sampleCount: int16Samples.count)
         int16Samples.withUnsafeBufferPointer { buf in
             audioBuffer.append(Data(buffer: buf))
         }
 
-        samples.withUnsafeBufferPointer { buf in
-            SherpaOnnxOnlineStreamAcceptWaveform(s, sampleRate, buf.baseAddress, Int32(buf.count))
+        normalizedSamples.withUnsafeBufferPointer { buf in
+            SherpaOnnxOnlineStreamAcceptWaveform(s, 16_000, buf.baseAddress, Int32(buf.count))
         }
 
         while SherpaOnnxIsOnlineStreamReady(recognizer!, s) != 0 {
@@ -215,6 +272,7 @@ actor SherpaService {
 
         if displayText.isEmpty {
             if audioSec < Self.noTextCutMinimumAudioSec {
+                _ = segmentTimeline.finishSegment(retainedOverlapSamples: 0)
                 audioBuffer = Data()
                 lastPartialText = ""
                 lastTextTime = Date()
@@ -228,7 +286,9 @@ actor SherpaService {
 
         let overlapBytes = 32000
         let pcmCopy = Data(audioBuffer)
+        let retainedOverlapSamples: Int
         if audioBuffer.count > overlapBytes {
+            retainedOverlapSamples = overlapBytes / MemoryLayout<Int16>.size
             let overlap = Data(audioBuffer.suffix(overlapBytes))
             resetStream()
             if let newStream = stream {
@@ -242,6 +302,7 @@ actor SherpaService {
             }
             audioBuffer = Data(overlap)
         } else {
+            retainedOverlapSamples = 0
             audioBuffer = Data()
             resetStream()
         }
@@ -253,8 +314,16 @@ actor SherpaService {
         voiceActivityService.reset()
 
         let uid = UUID()
+        let timing = segmentTimeline.finishSegment(retainedOverlapSamples: retainedOverlapSamples)
         print("[SherpaService] segment: \"\(displayText.prefix(60))\" pcm=\(pcmCopy.count)B sil=\(String(format: "%.2f", sil))s textSil=\(String(format: "%.2f", textSil))s audio=\(String(format: "%.2f", audioSec))s")
         onSegment?(uid, pcmCopy, displayText)
+        onTimedSegment?(SherpaSegment(
+            id: uid,
+            pcmData: pcmCopy,
+            text: displayText,
+            startTime: timing.startTime,
+            endTime: timing.endTime
+        ))
     }
 
     private func resetStream() {

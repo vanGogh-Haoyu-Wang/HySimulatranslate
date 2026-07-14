@@ -1,6 +1,28 @@
 import Foundation
 
 actor NvidiaSummaryService {
+    func summarize(prompt: String, credential: LLMProviderCredential, isFinal: Bool) async -> String? {
+        normalizedSummary(from: await requestChatCompletion(
+            credential: credential,
+            prompt: prompt,
+            maxTokens: isFinal ? 1800 : 900,
+            timeout: isFinal ? 60 : credential.provider.timeout
+        ))
+    }
+    static func makePrompt(
+        template: SummaryTemplateRecord,
+        previousSummary: String,
+        content: String,
+        isFinal: Bool
+    ) throws -> String {
+        try SummaryPromptRenderer.make(
+            template: template,
+            previousSummary: previousSummary,
+            content: content,
+            isFinal: isFinal
+        )
+    }
+
     func testConnectivity(credential: LLMProviderCredential?) async -> LLMProviderCheckResult {
         let provider = credential?.provider ?? LLMProviderCatalog.nvidiaSummaryProvider!
         guard let credential else {
@@ -39,6 +61,19 @@ actor NvidiaSummaryService {
         return normalizedSummary(from: result)
     }
 
+    func summarize(
+        previousSummary: String,
+        newContent: String,
+        template: SummaryTemplateRecord,
+        credential: LLMProviderCredential
+    ) async -> String? {
+        guard let prompt = try? Self.makePrompt(template: template, previousSummary: previousSummary, content: newContent, isFinal: false) else { return nil }
+        return normalizedSummary(from: await requestChatCompletion(
+            credential: credential, prompt: prompt, maxTokens: 900,
+            timeout: credential.provider.timeout
+        ))
+    }
+
     func summarizeFinalDetailed(
         previousSummary: String,
         fullContent: String,
@@ -55,6 +90,18 @@ actor NvidiaSummaryService {
             timeout: 60.0
         )
         return normalizedSummary(from: result)
+    }
+
+    func summarizeFinalDetailed(
+        previousSummary: String,
+        fullContent: String,
+        template: SummaryTemplateRecord,
+        credential: LLMProviderCredential
+    ) async -> String? {
+        guard let prompt = try? Self.makePrompt(template: template, previousSummary: previousSummary, content: fullContent, isFinal: true) else { return nil }
+        return normalizedSummary(from: await requestChatCompletion(
+            credential: credential, prompt: prompt, maxTokens: 1800, timeout: 60
+        ))
     }
 
     private func normalizedSummary(from result: ChatCompletionResult) -> String? {

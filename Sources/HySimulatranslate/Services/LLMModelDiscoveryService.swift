@@ -21,7 +21,7 @@ enum LLMModelDiscoveryError: LocalizedError {
 }
 
 struct LLMModelDiscoveryService {
-    func fetchFreeModels(
+    func fetchTextModels(
         for providerID: LLMProviderID,
         apiKey: String
     ) async throws -> [LLMProviderModel] {
@@ -47,7 +47,7 @@ struct LLMModelDiscoveryService {
             throw LLMModelDiscoveryError.httpStatus(http.statusCode)
         }
 
-        return LLMProviderCatalog.freeModels(
+        return LLMProviderCatalog.textModels(
             for: providerID,
             modelIDs: try Self.modelIDs(from: data)
         )

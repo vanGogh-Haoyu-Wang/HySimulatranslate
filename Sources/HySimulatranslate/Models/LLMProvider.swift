@@ -49,8 +49,8 @@ enum LLMProviderModelFreeStatus: String, Codable, Sendable {
 
     var displayText: String {
         switch self {
-        case .free: return "Free"
-        case .unknown: return "Unknown"
+        case .free: return "免费"
+        case .unknown: return "资费未知"
         }
     }
 
@@ -189,11 +189,42 @@ enum LLMProviderCatalog {
         }
     }
 
-    static func freeModels(for providerID: LLMProviderID, modelIDs: [String]) -> [LLMProviderModel] {
+    static func textModels(for providerID: LLMProviderID, modelIDs: [String]) -> [LLMProviderModel] {
         let uniqueIDs = Array(Set(modelIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
             .filter { !$0.isEmpty }
-        let models = uniqueIDs.compactMap { model(for: providerID, modelID: $0, preserveUnknown: false) }
+        let models = uniqueIDs.compactMap { id -> LLMProviderModel? in
+            guard isTextModelCandidate(providerID: providerID, modelID: id) else { return nil }
+            return LLMProviderModel(
+                providerID: providerID,
+                id: id,
+                freeStatus: isConfirmedFree(providerID: providerID, modelID: id) ? .free : .unknown,
+                recommendationScore: recommendationScore(for: providerID, modelID: id)
+            )
+        }
         return sortedModels(models)
+    }
+
+    static func isTextModelCandidate(providerID: LLMProviderID, modelID: String) -> Bool {
+        let tokens = modelID
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        let excludedTokens: Set<String> = [
+            "audio", "asr", "speech", "stt", "tts", "whisper", "parakeet", "canary", "orpheus",
+            "video", "image", "vision", "vl", "vla", "multimodal", "omni", "ocr", "cosmos",
+            "embed", "embedding", "embeddings", "rerank", "reranker", "retrieval", "retriever",
+            "moderation", "moderator", "guard", "safeguard", "safety", "jailbreak", "yolo"
+        ]
+        return excludedTokens.isDisjoint(with: tokens)
+    }
+
+    static func isRecommended(providerID: LLMProviderID, modelID: String) -> Bool {
+        let id = modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch providerID {
+        case .groq: return groqKnownFreeTextModels[id] != nil
+        case .nvidia: return nvidiaKnownFreeSummaryModels[id] != nil
+        case .agnes: return id == defaultAgnesOrganizerModelName
+        }
     }
 
     static func model(
@@ -203,34 +234,14 @@ enum LLMProviderCatalog {
     ) -> LLMProviderModel? {
         let id = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !id.isEmpty else { return nil }
-        switch providerID {
-        case .groq:
-            if isKnownGroqFreeTextModel(id) {
-                return LLMProviderModel(
-                    providerID: providerID,
-                    id: id,
-                    freeStatus: .free,
-                    recommendationScore: recommendationScore(for: providerID, modelID: id)
-                )
-            }
-        case .nvidia:
-            if isLikelyNvidiaFreeSummaryModel(id) {
-                return LLMProviderModel(
-                    providerID: providerID,
-                    id: id,
-                    freeStatus: .free,
-                    recommendationScore: recommendationScore(for: providerID, modelID: id)
-                )
-            }
-        case .agnes:
-            if id == defaultAgnesOrganizerModelName {
-                return LLMProviderModel(
-                    providerID: providerID,
-                    id: id,
-                    freeStatus: .free,
-                    recommendationScore: recommendationScore(for: providerID, modelID: id)
-                )
-            }
+        guard isTextModelCandidate(providerID: providerID, modelID: id) else { return nil }
+        if isConfirmedFree(providerID: providerID, modelID: id) {
+            return LLMProviderModel(
+                providerID: providerID,
+                id: id,
+                freeStatus: .free,
+                recommendationScore: recommendationScore(for: providerID, modelID: id)
+            )
         }
 
         guard preserveUnknown else { return nil }
@@ -286,6 +297,13 @@ enum LLMProviderCatalog {
 
     static func agnesOrganizerCredential(from keys: [LLMProviderID: String]) -> LLMProviderCredential? {
         credential(for: .agnes, from: keys)
+    }
+
+    static func agnesOrganizerCredential(
+        from keys: [LLMProviderID: String],
+        selectedModelNames: [LLMProviderID: String]
+    ) -> LLMProviderCredential? {
+        credential(for: .agnes, from: keys, selectedModelNames: selectedModelNames)
     }
 
     static func credential(
@@ -384,31 +402,13 @@ enum LLMProviderCatalog {
         "meta/llama-3.1-70b-instruct": 72
     ]
 
-    private static func isKnownGroqFreeTextModel(_ modelID: String) -> Bool {
+    private static func isConfirmedFree(providerID: LLMProviderID, modelID: String) -> Bool {
         let id = modelID.lowercased()
-        return groqKnownFreeTextModels[id] != nil ||
-            id.hasPrefix("openai/gpt-oss-") ||
-            id.hasPrefix("qwen/") ||
-            id.hasPrefix("moonshotai/kimi-k2") ||
-            id.hasPrefix("meta-llama/llama-4-") ||
-            id == "llama-3.1-8b-instant" ||
-            id == "llama-3.3-70b-versatile" ||
-            id == "deepseek-r1-distill-llama-70b" ||
-            id == "gemma2-9b-it" ||
-            id.hasPrefix("compound-beta")
-    }
-
-    private static func isLikelyNvidiaFreeSummaryModel(_ modelID: String) -> Bool {
-        let id = modelID.lowercased()
-        if nvidiaKnownNonFreeOrProblemModels.contains(id) { return false }
-        if nvidiaKnownFreeSummaryModels[id] != nil { return true }
-        guard id.contains("llama") || id.contains("nemotron") else { return false }
-        let excludedFragments = [
-            "safety", "guard", "vl", "vision", "embed", "rerank", "retriever",
-            "parakeet", "asr", "tts", "ocr", "translate", "cosmos", "be v",
-            "yolo", "parse", "content-safety", "jailbreak"
-        ]
-        return !excludedFragments.contains { id.contains($0) }
+        switch providerID {
+        case .groq: return groqKnownFreeTextModels[id] != nil
+        case .nvidia: return nvidiaKnownFreeSummaryModels[id] != nil
+        case .agnes: return id == defaultAgnesOrganizerModelName
+        }
     }
 
     private static func recommendationScore(for providerID: LLMProviderID, modelID: String) -> Int {
@@ -435,7 +435,4 @@ enum LLMProviderCatalog {
         return 50
     }
 
-    private static let nvidiaKnownNonFreeOrProblemModels: Set<String> = [
-        "nvidia/llama-3.3-nemotron-super-49b-v1.5"
-    ]
 }

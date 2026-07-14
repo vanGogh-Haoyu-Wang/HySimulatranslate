@@ -12,9 +12,12 @@ enum SelfCheckScope: Equatable {
 
 @MainActor
 final class TranscriptionViewModel: ObservableObject {
+    let modelCenterViewModel: ModelCenterViewModel
     @Published var engineStatus: EngineStatus = .idle
     @Published var statusMessage: String = "初始化..."
     @Published var draftText: String = ""
+    @Published var draftAppleTranslation: String = ""
+    @Published var appleRealtimeTranslations: [UUID: String] = [:]
     @Published var historyItems: [TranscriptionItem] = []
     @Published var dynamicItems: [TranscriptionItem] = []
     @Published var translationOnlyHistoryBlocks: [TranslationOnlyHistoryBlock] = []
@@ -33,6 +36,7 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var sherpaReady = false
     @Published var whisperReady = false
     @Published var speakerKitReady = false
+    @Published var appleTranslationReady = false
     @Published var apiReady = false
     @Published var providerCheckResults: [LLMProviderCheckResult] = []
     @Published var liveSummaryText: String = ""
@@ -40,10 +44,6 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var liveSummaryReady = false
     @Published var isLiveSummaryUpdating = false
     @Published var isFinalizingSession = false
-    @Published var groqModelOptions: [LLMProviderModel] = LLMProviderCatalog.models(for: .groq)
-    @Published var nvidiaSummaryModelOptions: [LLMProviderModel] = LLMProviderCatalog.models(for: .nvidia)
-    @Published var isRefreshingProviderModels = false
-    @Published var providerModelRefreshStatus = ""
     @Published var audioInputSelection: AudioInputSelection = .defaultSelection
     @Published var selectedAudioCaptureSource: AudioCaptureSource = .microphone
     @Published var availableAudioCaptureSources: [AudioCaptureSource] = [.microphone, .systemAudio]
@@ -54,16 +54,38 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var selectedNoteRecord: NoteRecord?
     @Published var notePreviewText: String = ""
     @Published var notePreviewStatus: String = ""
+    @Published private(set) var meetings: [MeetingRecord] = []
+    @Published private(set) var selectedMeeting: MeetingRecord?
+    @Published private(set) var selectedMeetingSegments: [TranscriptSegmentRecord] = []
+    @Published private(set) var selectedMeetingAudioURL: URL?
+    @Published private(set) var selectedMeetingRevisions: [TranscriptRevisionRecord] = []
+    @Published private(set) var selectedTranslationRevisions: [TranslationRevisionRecord] = []
+    @Published var selectedTranslationRevisionID: UUID?
+    @Published private(set) var selectedMeetingTranslations: [UUID: String] = [:]
+    @Published private(set) var selectedMeetingSpeakerAliases: [String: String] = [:]
+    @Published private(set) var pendingImportJobs: [ImportJobRecord] = []
+    @Published private(set) var resumedImportProgress: [UUID: Double] = [:]
+    @Published var selectedMeetingRevisionID: UUID?
+    @Published private(set) var isImportingAudio = false
+    @Published private(set) var importProgress: Double = 0
+    @Published private(set) var retranslationStatus = ""
+    @Published private(set) var retranslationError: String?
+    @Published private(set) var meetingLibraryStatus = "正在载入会话库…"
+    @Published private(set) var isMeetingLibraryReady = false
+    @Published private(set) var summaryWorkspace: SummaryWorkspaceController?
+    var unindexedNoteRecords: [NoteRecord] {
+        Self.deduplicatedNoteRecords(noteRecords, meetings: meetings)
+    }
+    var meetingPlayback: MeetingPlaybackController { appServices.playback }
     @AppStorage("whisperRefinementMode") var whisperRefinementModeRaw = WhisperRefinementMode.smartHybrid.rawValue
     @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
     @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
     @AppStorage("groqCoreModelName") var groqCoreModelName: String = LLMProviderCatalog.defaultGroqModelName
     @AppStorage("nvidiaSummaryModelName") var nvidiaSummaryModelName: String = LLMProviderCatalog.defaultNvidiaSummaryModelName
+    @AppStorage("agnesOrganizerModelName") var agnesOrganizerModelName: String = LLMProviderCatalog.defaultAgnesOrganizerModelName
     @AppStorage("historyDisplayMode") var historyDisplayModeRaw: String = HistoryDisplayMode.defaultMode.rawValue
     @AppStorage("audioInputSelection") private var audioInputSelectionStorage: String = AudioInputSelection.defaultSelectionStorageValue
     @AppStorage("audioCaptureSource") private var audioCaptureSourceStorage: String = AudioCaptureSource.microphoneStorageValue
-    @AppStorage("groqModelOptionsJSON") private var groqModelOptionsJSON: String = ""
-    @AppStorage("nvidiaSummaryModelOptionsJSON") private var nvidiaSummaryModelOptionsJSON: String = ""
     @AppStorage("providerModelConnectivityRecordsJSON") private var providerModelConnectivityRecordsJSON: String = ""
 
     var providerAPIKeys: [LLMProviderID: String] = [:]
@@ -94,12 +116,14 @@ final class TranscriptionViewModel: ObservableObject {
     var selectedProviderModelNames: [LLMProviderID: String] {
         [
             .groq: groqCoreModelName,
-            .nvidia: nvidiaSummaryModelName
+            .nvidia: nvidiaSummaryModelName,
+            .agnes: agnesOrganizerModelName
         ]
     }
 
     var canStartTranscription: Bool {
         guard !isFinalizingSession else { return false }
+        guard isMeetingLibraryReady else { return false }
         guard case .ready = engineStatus else { return false }
         return audioCaptureReady && sherpaReady && whisperReady
     }
@@ -131,16 +155,27 @@ final class TranscriptionViewModel: ObservableObject {
     private let audioCaptureCoordinator = AudioCaptureCoordinator()
     private let sherpaService = SherpaService()
     private let whisperKitService = WhisperKitService()
-    private let speechDenoiserService = SpeechDenoiserService()
     private let llmService = LLMService()
-    private let translationService = TranslationService()
+    private let appleTranslationService: any AppleSystemTranslating
+    private let translationService: TranslationService
     private let nvidiaSummaryService = NvidiaSummaryService()
     private let agnesHistoryOrganizerService = AgnesHistoryOrganizerService()
     private let speakerDiarizationService = SpeakerDiarizationService()
-    private let modelDiscoveryService = LLMModelDiscoveryService()
     private let sessionAudioStore = SessionAudioStore()
     private let sessionRecoveryJournal = SessionRecoveryJournal()
     private let diagnosticsLogger = PipelineDiagnosticsLogger()
+    private let noteExportService = NoteExportService()
+    private var meetingLibraryController: MeetingLibraryController?
+    private var revisionWorkspaceController: RevisionWorkspaceController?
+    private var importWorkspaceController: ImportWorkspaceController?
+    private var livePersistenceSession: LivePersistenceSession?
+    private var sessionGeneration: UInt64 = 0
+    private var sessionCaptureStartedAt: ContinuousClock.Instant?
+    private var timedSegments: [UUID: (start: TimeInterval, end: TimeInterval, draft: String)] = [:]
+    private let appServices: AppServices
+    private var sessionCoordinator: SessionCoordinator?
+    private var sessionContext: SessionCoordinator.Context?
+    private var loadedModelLease: ModelResourceLease?
 
     // 队列
     private var whisperQueue: [WhisperQueueItem] = []
@@ -178,6 +213,8 @@ final class TranscriptionViewModel: ObservableObject {
     private var organizerWorkerTask: Task<Void, Never>?
     private var translationWorkerTask1: Task<Void, Never>?
     private var translationWorkerTask2: Task<Void, Never>?
+    private var draftAppleTranslationTask: Task<Void, Never>?
+    private var appleRealtimeTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var volumePollTask: Task<Void, Never>?
     private var dynamicIdleFlushTask: Task<Void, Never>?
     private var summaryTask: Task<Void, Never>?
@@ -198,7 +235,18 @@ final class TranscriptionViewModel: ObservableObject {
 
     private var isChecking = false
 
-    init() {
+    init(
+        appleTranslationService: any AppleSystemTranslating = AppleSystemTranslationService(),
+        modelResourceService: ModelResourceService = .shared,
+        appServices: AppServices? = nil
+    ) {
+        let resolvedServices = appServices ?? AppServices(modelResources: modelResourceService, modelUsage: ModelUsageCoordinator(resources: modelResourceService))
+        self.appServices = resolvedServices
+        self.modelCenterViewModel = ModelCenterViewModel(resourceService: modelResourceService)
+        self.appleTranslationService = appleTranslationService
+        self.translationService = TranslationService(
+            appleTranslator: appleTranslationService
+        )
         let hadDeprecatedApplicationAudio = AudioCaptureSource.containsDeprecatedApplicationAudio(audioCaptureSourceStorage)
         let storedAudioInputSelection = UserDefaults.standard.string(forKey: "audioInputSelection")
         audioInputSelection = AudioInputSelection.fromStorageValue(
@@ -214,14 +262,6 @@ final class TranscriptionViewModel: ObservableObject {
         }
         availableAudioCaptureSources = Self.supportedAudioCaptureSources(selected: selectedAudioCaptureSource)
         providerModelConnectivityRecords = Self.decodeConnectivityRecords(from: providerModelConnectivityRecordsJSON)
-        groqModelOptions = normalizedProviderModelOptions(
-            for: .groq,
-            models: Self.decodeModels(from: groqModelOptionsJSON) ?? LLMProviderCatalog.models(for: .groq)
-        )
-        nvidiaSummaryModelOptions = normalizedProviderModelOptions(
-            for: .nvidia,
-            models: Self.decodeModels(from: nvidiaSummaryModelOptionsJSON) ?? LLMProviderCatalog.models(for: .nvidia)
-        )
         _ = try? SessionRecoveryJournal.recoverPendingSessions(
             rootDirectory: SessionAudioStore.defaultRootDirectory()
         )
@@ -231,6 +271,214 @@ final class TranscriptionViewModel: ObservableObject {
             }
         }
         resourcePressureMonitor?.start()
+        modelCenterViewModel.configureModelSelection(selectedModels: selectedProviderModelNames) { [weak self] providerID, modelID in
+            self?.selectProviderModel(modelID, for: providerID)
+        }
+        initializeMeetingLibrary()
+    }
+
+    private func selectProviderModel(_ modelID: String, for providerID: LLMProviderID) {
+        switch providerID {
+        case .groq: groqCoreModelName = modelID
+        case .nvidia: nvidiaSummaryModelName = modelID
+        case .agnes: agnesOrganizerModelName = modelID
+        }
+        noteProviderModelSelectionChanged()
+    }
+
+    private func initializeMeetingLibrary() {
+        let noteDirectory = Self.noteDirectory(from: noteDirectoryPath)
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                let (database, active, purged) = try WorkspaceCompositionRoot.prepare(noteDirectory: noteDirectory)
+                let sessionsRoot = Self.sessionAssetsRootDirectory()
+                for id in purged {
+                    try? FileManager.default.removeItem(at: sessionsRoot.appendingPathComponent(id.uuidString, isDirectory: true))
+                }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    let workspace = WorkspaceCompositionRoot.compose(database: database, app: self.appServices, translationService: self.translationService, appleTranslator: self.appleTranslationService, noteDirectory: Self.noteDirectory(from: self.noteDirectoryPath), sessionsRoot: Self.sessionAssetsRootDirectory(), playback: self.appServices.playback)
+                    self.meetingLibraryController = workspace.meetingLibrary
+                    let summaryWorkspace = workspace.summaries
+                    summaryWorkspace.loadTemplates()
+                    self.summaryWorkspace = summaryWorkspace
+                    self.importWorkspaceController = workspace.imports
+                    self.pendingImportJobs = self.importWorkspaceController?.pendingJobs ?? []
+                    self.sessionCoordinator = workspace.sessions
+                    self.revisionWorkspaceController = workspace.revisions
+                    self.isMeetingLibraryReady = true
+                    self.meetings = active
+                    self.meetingLibraryStatus = purged.isEmpty ? "" : "已清理 \(purged.count) 个过期会话"
+                    for job in self.pendingImportJobs { self.startResumeImport(job) }
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.isMeetingLibraryReady = false
+                    self?.meetingLibraryStatus = "会话库不可用，继续使用笔记文件：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func refreshMeetingLibrary() {
+        guard let meetingLibraryController else { return }
+        meetings = (try? meetingLibraryController.refresh()) ?? []
+    }
+
+    func selectMeeting(_ meeting: MeetingRecord) {
+        guard !isRecording, !isFinalizingSession else { return }
+        summaryWorkspace?.load(meeting: meeting)
+        do {
+            guard let selection = try meetingLibraryController?.select(meeting) else { return }
+            selectedMeeting = selection.meeting; selectedMeetingSegments = selection.segments
+            selectedMeetingRevisions = selection.revisions; selectedTranslationRevisions = selection.translationRevisions
+            selectedMeetingRevisionID = meeting.currentTranscriptRevisionID; selectedTranslationRevisionID = meeting.currentTranslationRevisionID
+            selectedMeetingAudioURL = selection.audioURL; selectedMeetingSpeakerAliases = selection.speakerAliases
+            selectedMeetingTranslations = selection.translations
+        } catch {
+            meetingLibraryStatus = "无法打开会话：\(error.localizedDescription)"
+        }
+    }
+
+    func setSelectedMeetingSpeakerAlias(speakerID: String, displayName: String) {
+        guard let meeting = selectedMeeting, let meetingLibraryController else { return }
+        do {
+            selectedMeetingSpeakerAliases = try meetingLibraryController.setAlias(meetingID: meeting.id, speakerID: speakerID, displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines))
+        } catch { meetingLibraryStatus = "无法保存说话人名称：\(error.localizedDescription)" }
+    }
+
+    func selectedMeetingSpeakerName(_ speakerID: String) -> String {
+        selectedMeetingSpeakerAliases[speakerID] ?? SpeakerDisplayName.displayName(for: speakerID)
+    }
+
+    func selectMeetingRevision(_ revisionID: UUID?) {
+        guard let revisionID, let meeting = selectedMeeting, let revisions = revisionWorkspaceController else { return }
+        do {
+            guard let refreshed = try revisions.selectTranscript(revisionID, meetingID: meeting.id) else { return }
+            selectMeeting(refreshed)
+        } catch { meetingLibraryStatus = "无法切换转写版本：\(error.localizedDescription)" }
+    }
+
+    func selectTranslationRevision(_ revisionID: UUID?) {
+        guard let revisionID, let meeting = selectedMeeting, let revisions = revisionWorkspaceController else { return }
+        do { try revisions.selectTranslation(revisionID, meetingID: meeting.id); selectedTranslationRevisionID = revisionID; reloadSelectedTranslations() }
+        catch { meetingLibraryStatus = "无法切换翻译版本：\(error.localizedDescription)" }
+    }
+
+    // Compatibility forwarding keeps the main view model API stable while summary
+    // state and persistence live in SummaryWorkspaceController.
+    var selectedSummaryTemplate: SummaryTemplateRecord? { summaryWorkspace?.selectedTemplate }
+    func selectSummaryTemplate(_ id: UUID?) { summaryWorkspace?.selectTemplate(id) }
+    func selectSummaryRevision(_ id: UUID?) {
+        guard let id, let meetingID = selectedMeeting?.id else { return }
+        do { try summaryWorkspace?.selectSummaryRevision(id, meetingID: meetingID) }
+        catch { meetingLibraryStatus = "无法切换摘要版本：\(error.localizedDescription)" }
+    }
+
+    private func reloadSelectedTranslations() {
+        guard let revisionID = selectedTranslationRevisionID, let revisions = revisionWorkspaceController else { selectedMeetingTranslations = [:]; return }
+        selectedMeetingTranslations = (try? revisions.translations(revisionID)) ?? [:]
+    }
+
+    func retranslateSelectedMeeting() async {
+        guard let meeting = selectedMeeting, let transcriptID = selectedMeetingRevisionID,
+              let workspace = importWorkspaceController else { return }
+        retranslationStatus = "正在重新翻译…"
+        retranslationError = nil
+        let credential = LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)
+        do {
+            let refreshed = try await workspace.retranslate(meeting: meeting, transcriptRevisionID: transcriptID, credential: credential)
+            selectMeeting(refreshed)
+            retranslationStatus = "重新翻译完成"
+            retranslationError = nil
+        } catch {
+            retranslationStatus = "重新翻译失败"
+            retranslationError = error.localizedDescription
+        }
+    }
+
+    func retryRetranslation() { Task { await retranslateSelectedMeeting() } }
+
+    func retranscribeSelectedMeeting(options: ImportOptions) async {
+        guard let meeting = selectedMeeting, let url = selectedMeetingAudioURL,
+              let workspace = importWorkspaceController else { return }
+        isImportingAudio = true
+        let credential = LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)
+        let refreshed = try? await workspace.retranscribe(meeting: meeting, audioURL: url, options: options, credential: credential)
+        importProgress = workspace.progress
+        isImportingAudio = false
+        if let refreshed { selectMeeting(refreshed) }
+    }
+
+    func resumeImport(_ job: ImportJobRecord) async {
+        guard let workspace = importWorkspaceController else { return }
+        let credential = LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)
+        await workspace.resume(job, credential: credential)
+        pendingImportJobs = workspace.pendingJobs; resumedImportProgress = workspace.resumedProgress
+        refreshMeetingLibrary()
+    }
+    func startResumeImport(_ job: ImportJobRecord) {
+        guard let workspace = importWorkspaceController else { return }
+        let credential = LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)
+        workspace.startResume(job, credential: credential)
+        resumedImportProgress = workspace.resumedProgress
+    }
+    func cancelImport(jobID: UUID) { importWorkspaceController?.cancel(jobID: jobID) }
+
+    func importAudio(from url: URL, options: ImportOptions) async {
+        guard !isRecording, !isFinalizingSession, let workspace = importWorkspaceController else { return }
+        isImportingAudio = true; importProgress = 0; meetingLibraryStatus = "正在导入 \(url.lastPathComponent)…"
+        do {
+            let credential = LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)
+            let meeting = try await workspace.importAudio(from: url, options: options, sessionsRoot: Self.sessionAssetsRootDirectory(), credential: credential)
+            importProgress = workspace.progress
+            meetingLibraryStatus = "导入完成"
+            refreshMeetingLibrary()
+            selectMeeting(meeting)
+        } catch { meetingLibraryStatus = "导入失败：\(error.localizedDescription)" }
+        isImportingAudio = false
+    }
+
+    func deleteMeeting(_ meeting: MeetingRecord) {
+        do {
+            try meetingLibraryController?.softDelete(meeting)
+            if selectedMeeting?.id == meeting.id {
+                clearSelectedMeeting()
+            }
+            refreshMeetingLibrary()
+        } catch { meetingLibraryStatus = "删除失败：\(error.localizedDescription)" }
+    }
+
+    var translationExecutionMode: TranslationExecutionMode {
+        TranslationExecutionMode.resolve(
+            apiReady: apiReady,
+            appleReady: appleTranslationReady
+        )
+    }
+
+    func prepareAppleTranslationForTesting() async {
+        appleTranslationReady = await appleTranslationService.prepare()
+    }
+
+    func applyTranslationReadinessForTesting(
+        apiReady: Bool,
+        appleReady: Bool
+    ) {
+        applyTranslationReadiness(apiReady: apiReady, appleReady: appleReady)
+    }
+
+    func applyMeetingLibraryReadinessForTesting(_ ready: Bool, message: String) {
+        isMeetingLibraryReady = ready
+        meetingLibraryStatus = message
+    }
+
+    private func applyTranslationReadiness(
+        apiReady: Bool,
+        appleReady: Bool
+    ) {
+        self.apiReady = apiReady
+        appleTranslationReady = appleReady
+        translationEnabled = translationExecutionMode.isTranslationEnabled
     }
 
     func setMicrophoneInputEnabled(_ enabled: Bool) {
@@ -356,6 +604,16 @@ final class TranscriptionViewModel: ObservableObject {
         noteRecords = Self.scanNoteRecords(in: Self.noteDirectory(from: noteDirectoryPath))
     }
 
+    nonisolated static func deduplicatedNoteRecords(
+        _ records: [NoteRecord],
+        meetings: [MeetingRecord]
+    ) -> [NoteRecord] {
+        let indexedPaths = Set(meetings.compactMap(\.legacyNotePath).map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
+        })
+        return records.filter { !indexedPaths.contains($0.url.standardizedFileURL.path) }
+    }
+
     func loadNotePreview(_ record: NoteRecord) async {
         selectedNoteRecord = record
         notePreviewStatus = "读取中"
@@ -377,6 +635,7 @@ final class TranscriptionViewModel: ObservableObject {
         guard !isRecording, !isFinalizingSession else { return }
         clearDisplayHistory()
         selectedNoteRecord = nil
+        clearSelectedMeeting()
         notePreviewText = ""
         notePreviewStatus = ""
         filePath = nil
@@ -403,6 +662,8 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func runFullSystemCheck(course: CourseSubject) {
+        loadedModelLease?.release()
+        loadedModelLease = nil
         isChecking = true
         fullSelfCheckRequired = true
         audioInputCheckRequired = false
@@ -414,6 +675,7 @@ final class TranscriptionViewModel: ObservableObject {
         sherpaReady = false
         whisperReady = false
         speakerKitReady = false
+        appleTranslationReady = false
         apiReady = false
         liveSummaryReady = false
         liveSummaryStatus = "未配置"
@@ -427,7 +689,13 @@ final class TranscriptionViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
-            defer { self.isChecking = false }
+            guard let checkLease = try? self.appServices.selfCheck.beginModelLoading() else {
+                self.isChecking = false
+                self.setStatus(.error("模型资源正在删除，请稍后重试"))
+                return
+            }
+            var retainsLoadedModels = false
+            defer { self.isChecking = false; if !retainsLoadedModels { checkLease.release() } }
 
             guard audioInputSelection.hasEnabledInput else {
                 audioInputCheckRequired = true
@@ -515,8 +783,8 @@ final class TranscriptionViewModel: ObservableObject {
             }
             sherpaReady = true
 
-            // 2️⃣ VAD / 降噪软依赖：失败时回退旧切段和原始 PCM
-            setStatus(.checking("检查 VAD 与降噪模型..."))
+            // 2️⃣ VAD 软依赖：失败时回退旧切段逻辑
+            setStatus(.checking("检查 VAD 模型..."))
             let vadURL = try? await ResourceDownloadService.ensureVADModel(onProgress: { [weak self] fraction, status in
                 Task { @MainActor [weak self] in
                     self?.downloadProgress = fraction
@@ -526,17 +794,6 @@ final class TranscriptionViewModel: ObservableObject {
             let vadReady = await sherpaService.configureVoiceActivity(modelURL: vadURL)
             if !vadReady {
                 print("[TranscriptionViewModel] VAD unavailable; using RMS/Sherpa boundary fallback")
-            }
-
-            let denoiserURL = try? await ResourceDownloadService.ensureSpeechDenoiserModel(onProgress: { [weak self] fraction, status in
-                Task { @MainActor [weak self] in
-                    self?.downloadProgress = fraction
-                    self?.downloadStatus = status
-                }
-            })
-            let denoiserReady = await speechDenoiserService.configure(modelURL: denoiserURL)
-            if !denoiserReady {
-                print("[TranscriptionViewModel] Denoiser unavailable; Whisper will use raw PCM")
             }
 
             // 3️⃣ WhisperKit 模型加载
@@ -561,7 +818,11 @@ final class TranscriptionViewModel: ObservableObject {
                 print("[TranscriptionViewModel] SpeakerKit unavailable; speaker labels will fall back to unknown")
             }
 
-            // 5️⃣ Groq 核心 + NVIDIA 总结 + Agnes 整理测试
+            // 5️⃣ Apple 系统翻译：仅使用已安装的英中模型，不在录音中弹下载 UI。
+            setStatus(.checking("检查 Apple 系统翻译..."))
+            appleTranslationReady = await appleTranslationService.prepare()
+
+            // 6️⃣ Groq 核心 + NVIDIA 总结 + Agnes 整理测试
             setStatus(.checking("测试 Groq、NVIDIA 与 Agnes..."))
             let groqResult = await llmService.testConnectivity(
                 credential: LLMProviderCatalog.groqCoreCredential(
@@ -576,13 +837,18 @@ final class TranscriptionViewModel: ObservableObject {
                 )
             )
             let agnesResult = await agnesHistoryOrganizerService.testConnectivity(
-                credential: LLMProviderCatalog.agnesOrganizerCredential(from: providerAPIKeys)
+                credential: LLMProviderCatalog.agnesOrganizerCredential(
+                    from: providerAPIKeys,
+                    selectedModelNames: selectedProviderModelNames
+                )
             )
             let mergedResults = [groqResult, summaryResult, agnesResult]
             providerCheckResults = mergedResults
             recordProviderModelConnectivity(mergedResults)
-            apiReady = groqResult.passed
-            translationEnabled = apiReady
+            applyTranslationReadiness(
+                apiReady: groqResult.passed,
+                appleReady: appleTranslationReady
+            )
             liveSummaryReady = summaryResult.passed
             liveSummaryStatus = liveSummaryReady ? "等待历史内容" : summaryResult.status.displayText
             print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), NVIDIA summary: \(summaryResult.status.displayText), Agnes organizer: \(agnesResult.status.displayText)")
@@ -592,6 +858,7 @@ final class TranscriptionViewModel: ObservableObject {
                 sherpa: sherpaReady,
                 whisper: whisperReady,
                 speakerKit: speakerKitReady,
+                appleTranslation: appleTranslationReady,
                 providerResults: mergedResults
             )
 
@@ -605,12 +872,15 @@ final class TranscriptionViewModel: ObservableObject {
 
             fullSelfCheckRequired = false
             audioInputCheckRequired = false
-            let mode = apiReady ? "在线同传" : "本地同传"
+            let mode = translationExecutionMode.statusTitle
             let summarySuffix = liveSummaryReady ? "，NVIDIA 总结可用" : ""
             setStatus(apiReady
                 ? .ready("✅ 自检通过：\(course.name) \(mode)\(summarySuffix)")
                 : .ready("🟡 API 未连通：\(course.name) \(mode)"))
-            print("[TranscriptionViewModel] Self-check ready: \(mode), translation=\(apiReady)")
+            loadedModelLease = checkLease
+            retainsLoadedModels = true
+            modelCenterViewModel.rescan()
+            print("[TranscriptionViewModel] Self-check ready: \(mode), translation=\(translationEnabled)")
         }
     }
 
@@ -645,6 +915,7 @@ final class TranscriptionViewModel: ObservableObject {
                 sherpa: sherpaReady,
                 whisper: whisperReady,
                 speakerKit: speakerKitReady,
+                appleTranslation: appleTranslationReady,
                 providerResults: providerCheckResults
             )
 
@@ -653,7 +924,7 @@ final class TranscriptionViewModel: ObservableObject {
                 return
             }
 
-            let mode = apiReady ? "在线同传" : "本地同传"
+            let mode = translationExecutionMode.statusTitle
             let summarySuffix = liveSummaryReady ? "，NVIDIA 总结可用" : ""
             setStatus(apiReady
                 ? .ready("✅ 音频输入已通过：\(course.name) \(mode)\(summarySuffix)")
@@ -707,7 +978,6 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     func noteProviderModelSelectionChanged() {
-        normalizeAllProviderModelOptions()
         providerCheckResults = LLMProviderCatalog.mergedCheckResults(
             from: providerAPIKeys,
             testedResults: [],
@@ -728,71 +998,6 @@ final class TranscriptionViewModel: ObservableObject {
             whisper: whisperReady,
             providerResults: providerCheckResults
         )
-    }
-
-    func providerModelOptions(for providerID: LLMProviderID) -> [LLMProviderModel] {
-        switch providerID {
-        case .groq:
-            return groqModelOptions
-        case .nvidia:
-            return nvidiaSummaryModelOptions
-        case .agnes:
-            return LLMProviderCatalog.models(for: .agnes)
-        }
-    }
-
-    func providerModelDisplayText(_ model: LLMProviderModel) -> String {
-        let key = LLMProviderCatalog.connectivityKey(providerID: model.providerID, modelID: model.id)
-        guard let record = providerModelConnectivityRecords[key] else {
-            return model.displayText
-        }
-        switch record.status {
-        case .passed:
-            return "\(model.displayText) · OK"
-        case .failed:
-            return "\(model.displayText) · Failed"
-        }
-    }
-
-    func refreshProviderModelLists() {
-        guard !isRefreshingProviderModels else { return }
-        isRefreshingProviderModels = true
-        providerModelRefreshStatus = "刷新模型列表..."
-
-        Task { [weak self] in
-            guard let self else { return }
-            let groq = await refreshProviderModels(for: .groq)
-            let nvidia = await refreshProviderModels(for: .nvidia)
-
-            groqModelOptions = groq.models
-            nvidiaSummaryModelOptions = nvidia.models
-            persistModelOptions()
-            providerModelRefreshStatus = [groq.status, nvidia.status].joined(separator: "；")
-            isRefreshingProviderModels = false
-        }
-    }
-
-    private func refreshProviderModels(
-        for providerID: LLMProviderID
-    ) async -> (models: [LLMProviderModel], status: String) {
-        let providerName = LLMProviderCatalog.provider(for: providerID)?.displayName ?? providerID.rawValue
-        let key = providerAPIKeys[providerID, default: ""]
-        do {
-            let fetched = try await modelDiscoveryService.fetchFreeModels(for: providerID, apiKey: key)
-            let models = normalizedProviderModelOptions(
-                for: providerID,
-                models: fetched.isEmpty ? LLMProviderCatalog.models(for: providerID) : fetched
-            )
-            return (models, "\(providerName) 已刷新 \(models.filter { $0.freeStatus == .free }.count) 个免费模型")
-        } catch {
-            let models = normalizedProviderModelOptions(
-                for: providerID,
-                models: providerModelOptions(for: providerID).isEmpty
-                    ? LLMProviderCatalog.models(for: providerID)
-                    : providerModelOptions(for: providerID)
-            )
-            return (models, "\(providerName) 刷新失败：\(error.localizedDescription)")
-        }
     }
 
     private func recordProviderModelConnectivity(_ results: [LLMProviderCheckResult]) {
@@ -825,43 +1030,6 @@ final class TranscriptionViewModel: ObservableObject {
             )
         }
         persistProviderModelConnectivityRecords()
-        normalizeAllProviderModelOptions()
-    }
-
-    private func normalizeAllProviderModelOptions() {
-        groqModelOptions = normalizedProviderModelOptions(for: .groq, models: groqModelOptions)
-        nvidiaSummaryModelOptions = normalizedProviderModelOptions(for: .nvidia, models: nvidiaSummaryModelOptions)
-        persistModelOptions()
-    }
-
-    private func normalizedProviderModelOptions(
-        for providerID: LLMProviderID,
-        models: [LLMProviderModel]
-    ) -> [LLMProviderModel] {
-        var merged = models.isEmpty ? LLMProviderCatalog.models(for: providerID) : models
-        if let selectedModel = selectedProviderModelNames[providerID],
-           let preserved = LLMProviderCatalog.model(
-                for: providerID,
-                modelID: selectedModel,
-                preserveUnknown: true
-           ) {
-            merged.append(preserved)
-        }
-        for record in providerModelConnectivityRecords.values where record.providerID == providerID {
-            if let model = LLMProviderCatalog.model(
-                for: providerID,
-                modelID: record.modelID,
-                preserveUnknown: true
-            ) {
-                merged.append(model)
-            }
-        }
-        return LLMProviderCatalog.sortedModels(merged, connectivityRecords: providerModelConnectivityRecords)
-    }
-
-    private func persistModelOptions() {
-        groqModelOptionsJSON = Self.encodeModels(groqModelOptions)
-        nvidiaSummaryModelOptionsJSON = Self.encodeModels(nvidiaSummaryModelOptions)
     }
 
     private func persistProviderModelConnectivityRecords() {
@@ -869,17 +1037,6 @@ final class TranscriptionViewModel: ObservableObject {
         guard let data = try? JSONEncoder().encode(records),
               let json = String(data: data, encoding: .utf8) else { return }
         providerModelConnectivityRecordsJSON = json
-    }
-
-    private static func decodeModels(from json: String) -> [LLMProviderModel]? {
-        guard let data = json.data(using: .utf8), !data.isEmpty else { return nil }
-        return try? JSONDecoder().decode([LLMProviderModel].self, from: data)
-    }
-
-    private static func encodeModels(_ models: [LLMProviderModel]) -> String {
-        guard let data = try? JSONEncoder().encode(models),
-              let json = String(data: data, encoding: .utf8) else { return "" }
-        return json
     }
 
     private static func decodeConnectivityRecords(
@@ -899,6 +1056,13 @@ final class TranscriptionViewModel: ObservableObject {
         guard !isRunning else { return }
         guard canStartTranscription else { return }
         guard let course = currentCourse else { return }
+        guard let sessionCoordinator else {
+            meetingLibraryStatus = "会话库仍在载入，请稍候再开始"
+            return
+        }
+        clearSelectedMeeting()
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
         finalSummaryTask?.cancel()
         finalSummaryTask = nil
         isFinalizingSession = false
@@ -906,6 +1070,7 @@ final class TranscriptionViewModel: ObservableObject {
         isRecording = true
         canRestart = false
         draftText = ""
+        clearAppleRealtimeTranslations()
         historyItems = []
         dynamicItems = []
         translationOnlyHistoryBlocks = []
@@ -934,6 +1099,8 @@ final class TranscriptionViewModel: ObservableObject {
         lectureFocusFilter = LectureFocusFilter()
         lectureMetricsByItemID = [:]
         recordingStartedAt = Date().timeIntervalSince1970
+        sessionCaptureStartedAt = ContinuousClock.now
+        timedSegments = [:]
         lastRenderTime = Date().timeIntervalSince1970
         lastDynamicInputTime = lastRenderTime
         setupFilePath()
@@ -941,7 +1108,7 @@ final class TranscriptionViewModel: ObservableObject {
         sherpaService.pauseVal = pauseVal
         sherpaService.limitVal = hardCutVal
 
-        Task { [weak self] in
+        Task { [weak self, sessionCoordinator] in
             guard let self else { return }
 
             if audioInputSelection.microphoneEnabled {
@@ -952,10 +1119,25 @@ final class TranscriptionViewModel: ObservableObject {
                     return
                 }
             }
-            guard self.isRunning else { return }
+            guard self.isRunning, self.sessionGeneration == generation else { return }
 
             do {
-                try self.sessionAudioStore.beginSession(sessionID: UUID())
+                let sources: Set<AudioChunkSource> = Set([
+                    self.audioInputSelection.microphoneEnabled ? AudioChunkSource.microphone : nil,
+                    self.audioInputSelection.systemAudioEnabled ? AudioChunkSource.systemAudio : nil
+                ].compactMap { $0 })
+                let context = try await sessionCoordinator.begin(title: course.name, subjectID: course.id, enabledSources: sources)
+                self.sessionContext = context
+                let persistenceSession = context.persistence
+                self.livePersistenceSession = persistenceSession
+                guard self.isRunning, self.sessionGeneration == generation else {
+                    try? await sessionCoordinator.abort(context)
+                    self.livePersistenceSession = nil
+                    self.sessionContext = nil
+                    return
+                }
+                let sessionID = persistenceSession.meetingID
+                try self.sessionAudioStore.beginSession(sessionID: sessionID)
                 guard let directory = self.sessionAudioStore.currentSessionDirectory(),
                       let notePath = self.filePath else {
                     throw NSError(
@@ -981,7 +1163,10 @@ final class TranscriptionViewModel: ObservableObject {
                 }
                 return
             }
-            guard self.isRunning else { return }
+            guard self.isRunning, self.sessionGeneration == generation else {
+                await self.cleanupCancelledStart(generation: generation)
+                return
+            }
 
             // 配置 LLM / Translation 回调
             await llmService.configure { [weak self] uid, text in
@@ -996,34 +1181,48 @@ final class TranscriptionViewModel: ObservableObject {
                     self.applyTranslation(uid: uid, zhText: zhText)
                 }
             })
-            guard self.isRunning else { return }
+            guard self.isRunning, self.sessionGeneration == generation else {
+                await self.cleanupCancelledStart(generation: generation)
+                return
+            }
 
             // 配置 Sherpa segment 回调
             await sherpaService.startStreaming(
-                onSegment: { [weak self] uid, pcm, sherpaText in
+                onTimedSegment: { [weak self] segment in
                     Task { @MainActor [weak self] in
                         guard let self, self.isRunning else { return }
-                        self.enqueueWhisperItem(uid: uid, pcm: pcm, sherpaText: sherpaText)
+                        self.timedSegments[segment.id] = (segment.startTime, segment.endTime, segment.text)
+                        guard self.sessionGeneration == generation else { return }
+                        guard let context = self.sessionContext else { return }
+                        Task { try? await self.sessionCoordinator?.upsert(
+                            context: context,
+                            id: segment.id,
+                            startTime: segment.startTime,
+                            endTime: segment.endTime,
+                            draft: segment.text,
+                            refined: segment.text,
+                            speakerID: nil
+                        ) }
+                        self.enqueueWhisperItem(uid: segment.id, pcm: segment.pcmData, sherpaText: segment.text)
                     }
                 },
                 onDraft: { [weak self] text in
                     Task { @MainActor [weak self] in
                         guard let self, self.isRunning else { return }
-                        self.noteDynamicInput()
-                        self.draftText = text
+                        self.updateSherpaDraft(text)
                     }
                 }
             )
-            guard self.isRunning else { return }
+            guard self.isRunning, self.sessionGeneration == generation else {
+                await self.cleanupCancelledStart(generation: generation)
+                return
+            }
 
             // 配置音频采集 → 串行合流 → 喂 Sherpa
-            await audioCaptureCoordinator.configure { [weak self] samples, sampleRate in
-                await self?.sherpaService.acceptWaveform(samples: samples, sampleRate: sampleRate)
-            }
             if audioInputSelection.microphoneEnabled {
                 speechEngine.configure { [weak self] samples, sampleRate in
                     Task { [weak self] in
-                        await self?.audioCaptureCoordinator.accept(samples: samples, sampleRate: sampleRate)
+                        await self?.acceptCapturedAudio(samples: samples, sampleRate: sampleRate, source: .microphone)
                     }
                 }
             }
@@ -1041,7 +1240,7 @@ final class TranscriptionViewModel: ObservableObject {
                 if audioInputSelection.systemAudioEnabled {
                     try await systemAudioCaptureEngine.start(source: .systemAudio) { [weak self] samples, sampleRate in
                         Task { [weak self] in
-                            await self?.audioCaptureCoordinator.accept(samples: samples, sampleRate: sampleRate)
+                            await self?.acceptCapturedAudio(samples: samples, sampleRate: sampleRate, source: .systemAudio)
                         }
                     }
                 }
@@ -1066,6 +1265,7 @@ final class TranscriptionViewModel: ObservableObject {
     func stopTranscription() {
         guard !(isFinalizingSession && !isRecording) else { return }
         let wasRecording = isRecording
+        sessionGeneration &+= 1
         isRunning = false
         isRecording = false
         if wasRecording {
@@ -1078,6 +1278,7 @@ final class TranscriptionViewModel: ObservableObject {
         cancelWorkerTasks()
 
         stopAudioCapture()
+        finalizeSessionAudioPipeline()
         Task {
             await sherpaService.stopStreaming()
             await llmService.stop()
@@ -1087,10 +1288,12 @@ final class TranscriptionViewModel: ObservableObject {
             for i in 0..<dynamicItems.count { dynamicItems[i].zone = .history }
             historyItems.append(contentsOf: dynamicItems)
             _ = applyLocalHistoryCleanup()
+            historyItems.forEach(persistLiveSegment)
             writeFileNow()
         }
         dynamicItems = []
         draftText = ""
+        clearAppleRealtimeTranslations()
         setStatus(.idle)
         statusMessage = wasRecording ? "正在整理详细总结..." : "麦克风已断开"
         flushPendingLLMFormatBatchIfReady(force: true)
@@ -1143,20 +1346,35 @@ final class TranscriptionViewModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldRequestDetailedSummary = liveSummaryReady && credential != nil && !fullContent.isEmpty
         let summaryService = nvidiaSummaryService
+        let template = summaryWorkspace?.selectedTemplate
+        let persistenceSession = livePersistenceSession
+        let summaryWorkspace = summaryWorkspace
 
         finalSummaryTask = Task { [weak self] in
             let agnesFinalTask = Task { [weak self] in
                 await self?.runFinalAgnesHistoryOrganizationIfAvailable()
             }
             var finalSummary: String?
-            if shouldRequestDetailedSummary, let credential {
-                finalSummary = await summaryService.summarizeFinalDetailed(
+            if shouldRequestDetailedSummary,
+               let credential, let template, let persistenceSession, let summaryWorkspace {
+                let revision = try? await summaryWorkspace.generate(
+                    meetingID: persistenceSession.meetingID,
+                    transcriptRevisionID: persistenceSession.revisionID,
+                    translationRevisionID: nil,
+                    template: template,
+                    provider: credential.provider.displayName,
+                    model: credential.provider.modelName,
                     previousSummary: previousSummary,
-                    fullContent: fullContent,
-                    credential: credential
-                )
+                    sourceContent: fullContent,
+                    isFinal: true
+                ) { prompt in
+                    await summaryService.summarize(prompt: prompt, credential: credential, isFinal: true)
+                }
+                if revision?.status == .succeeded { finalSummary = revision?.body }
             }
             await agnesFinalTask.value
+
+            await self?.completeLiveSessionPersistence()
 
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
@@ -1192,6 +1410,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func handleStartFailure(_ message: String) {
+        sessionGeneration &+= 1
         isRunning = false
         isRecording = false
         canRestart = false
@@ -1199,6 +1418,10 @@ final class TranscriptionViewModel: ObservableObject {
         stopAudioCapture()
         sessionRecoveryJournal.close()
         sessionAudioStore.cleanupCurrentSession()
+        let failedContext = sessionContext
+        sessionContext = nil
+        livePersistenceSession = nil
+        Task { if let failedContext { await sessionCoordinator?.fail(failedContext) } }
         diagnosticsTask?.cancel()
         diagnosticsTask = nil
         Task {
@@ -1217,6 +1440,72 @@ final class TranscriptionViewModel: ObservableObject {
         }
     }
 
+    private func acceptCapturedAudio(samples: [Float], sampleRate: Int32, source: AudioChunkSource) async {
+        guard isRunning, let coordinator = sessionCoordinator, let context = sessionContext else { return }
+        let elapsed = Self.elapsedSeconds(since: sessionCaptureStartedAt)
+        do {
+            let mixed = try coordinator.accept(AudioChunk(
+                source: source,
+                samples: samples,
+                sampleRate: Int(sampleRate),
+                sessionStartTime: elapsed
+            ), context: context)
+            if !mixed.isEmpty {
+                await sherpaService.acceptWaveform(samples: mixed, sampleRate: 16_000)
+            }
+        } catch {
+            print("[SessionAudioPipeline] \(error.localizedDescription)")
+        }
+    }
+
+    private func finalizeSessionAudioPipeline() {
+        guard let context = sessionContext else { return }
+        sessionCoordinator?.finalizeAudio(context)
+    }
+
+    private func completeLiveSessionPersistence() async {
+        guard let coordinator = sessionCoordinator, let context = sessionContext else { return }
+        let segments = historyItems.compactMap { item -> (UUID, TimeInterval, TimeInterval, String?, String, String?, PersistenceStatus)? in
+            guard let timing = timedSegments[item.id] else { return nil }
+            return (item.id, timing.start, timing.end, timing.draft, item.english, item.speakerID, item.isVisible && item.status != .dropped ? .succeeded : .cancelled)
+        }
+        do {
+            try await coordinator.finish(context, finalSegments: segments)
+        } catch {
+            meetingLibraryStatus = "会话持久化收尾失败：\(error.localizedDescription)"
+        }
+        livePersistenceSession = nil
+        sessionContext = nil
+        refreshMeetingLibrary()
+    }
+
+    private func cleanupCancelledStart(generation: UInt64) async {
+        guard sessionGeneration != generation else { return }
+        sessionRecoveryJournal.close()
+        sessionAudioStore.cleanupCurrentSession()
+        if let context = sessionContext { try? await sessionCoordinator?.abort(context) }
+        sessionContext = nil; livePersistenceSession = nil
+    }
+
+    private func clearSelectedMeeting() {
+        meetingPlayback.unload()
+        selectedMeeting = nil
+        selectedMeetingSegments = []
+        selectedMeetingAudioURL = nil
+        summaryWorkspace?.load(meeting: nil)
+    }
+
+    private static func elapsedSeconds(since start: ContinuousClock.Instant?) -> TimeInterval {
+        guard let start else { return 0 }
+        let components = start.duration(to: .now).components
+        return max(0, Double(components.seconds) + Double(components.attoseconds) / 1e18)
+    }
+
+    nonisolated private static func sessionAssetsRootDirectory() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("HySimulatranslate/Sessions", isDirectory: true)
+    }
+
     private func cancelWorkerTasks() {
         whisperWorkerTask?.cancel()
         whisperWorkerTask2?.cancel()
@@ -1230,6 +1519,10 @@ final class TranscriptionViewModel: ObservableObject {
         agnesOrganizationTask?.cancel()
         translationOnlyOrganizationTask?.cancel()
         speakerDiarizationTask?.cancel()
+        draftAppleTranslationTask?.cancel()
+        for task in appleRealtimeTranslationTasks.values {
+            task.cancel()
+        }
 
         whisperWorkerTask = nil
         whisperWorkerTask2 = nil
@@ -1243,6 +1536,8 @@ final class TranscriptionViewModel: ObservableObject {
         agnesOrganizationTask = nil
         translationOnlyOrganizationTask = nil
         speakerDiarizationTask = nil
+        draftAppleTranslationTask = nil
+        appleRealtimeTranslationTasks.removeAll()
         isLiveSummaryUpdating = false
         isAgnesOrganizing = false
         pendingAgnesOrganization = false
@@ -1262,6 +1557,7 @@ final class TranscriptionViewModel: ObservableObject {
         organizerQueue = []
         transQueue = []
         draftText = ""
+        clearAppleRealtimeTranslations()
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
         liveSummaryCursor.reset()
@@ -1293,6 +1589,7 @@ final class TranscriptionViewModel: ObservableObject {
         organizerQueue = []
         transQueue = []
         draftText = ""
+        clearAppleRealtimeTranslations()
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
         liveSummaryCursor.reset()
@@ -1311,6 +1608,7 @@ final class TranscriptionViewModel: ObservableObject {
         sherpa: Bool,
         whisper: Bool,
         speakerKit: Bool? = nil,
+        appleTranslation: Bool? = nil,
         providerResults: [LLMProviderCheckResult]
     ) {
         historyItems.removeAll { $0.isSystemMessage }
@@ -1331,6 +1629,9 @@ final class TranscriptionViewModel: ObservableObject {
         ])
         if let speakerKit {
             messages.append("[自检] SpeakerKit: \(speakerKit ? "通过" : "未通过")")
+        }
+        if let appleTranslation {
+            messages.append("[自检] Apple 系统翻译: \(appleTranslation ? "通过" : "未安装")")
         }
         messages.append(contentsOf: providerResults.filter { result in
             if result.provider.id == .agnes, result.status == .notConfigured {
@@ -1354,6 +1655,76 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - 队列操作
 
+    func updateSherpaDraftForTesting(_ text: String) {
+        updateSherpaDraft(text)
+    }
+
+    private func updateSherpaDraft(_ text: String) {
+        noteDynamicInput()
+        draftText = text
+        draftAppleTranslationTask?.cancel()
+        draftAppleTranslationTask = nil
+        draftAppleTranslation = ""
+
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard translationEnabled,
+              appleTranslationReady,
+              SmartWhisperRouting.containsLexicalContent(source)
+        else { return }
+
+        let translator = appleTranslationService
+        draftAppleTranslationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled,
+                  let translated = await translator.translate(source),
+                  !Task.isCancelled,
+                  let self,
+                  self.isRecording,
+                  self.draftText.trimmingCharacters(in: .whitespacesAndNewlines) == source
+            else { return }
+            self.draftAppleTranslation = translated
+        }
+    }
+
+    private func requestAppleRealtimeTranslation(uid: UUID, sherpaText: String) {
+        guard translationEnabled,
+              appleTranslationReady,
+              SmartWhisperRouting.containsLexicalContent(sherpaText)
+        else { return }
+
+        appleRealtimeTranslationTasks[uid]?.cancel()
+        let translator = appleTranslationService
+        appleRealtimeTranslationTasks[uid] = Task { [weak self] in
+            let translated = await translator.translate(sherpaText)
+            guard !Task.isCancelled, let self else { return }
+            self.appleRealtimeTranslationTasks[uid] = nil
+            guard let translated,
+                  self.dynamicItems.contains(where: { $0.id == uid && $0.zone == .dynamic })
+            else { return }
+            self.appleRealtimeTranslations[uid] = translated
+        }
+    }
+
+    private func clearDraftAppleTranslation() {
+        draftAppleTranslationTask?.cancel()
+        draftAppleTranslationTask = nil
+        draftAppleTranslation = ""
+    }
+
+    private func removeAppleRealtimeTranslation(for uid: UUID) {
+        appleRealtimeTranslationTasks.removeValue(forKey: uid)?.cancel()
+        appleRealtimeTranslations.removeValue(forKey: uid)
+    }
+
+    private func clearAppleRealtimeTranslations() {
+        clearDraftAppleTranslation()
+        for task in appleRealtimeTranslationTasks.values {
+            task.cancel()
+        }
+        appleRealtimeTranslationTasks.removeAll()
+        appleRealtimeTranslations.removeAll()
+    }
+
     private func enqueueWhisperItem(uid: UUID, pcm: Data, sherpaText: String) {
         if moveReadyDynamicItemsToHistory(forceLeadingCompleted: true) {
             syncFileOnQueue()
@@ -1365,11 +1736,13 @@ final class TranscriptionViewModel: ObservableObject {
         }
         if mergeIntoQueuedAccentAnalysisIfPossible(pcm: pcm, sherpaText: sherpaText) {
             draftText = ""
+            clearDraftAppleTranslation()
             renderUI(force: true)
             return
         }
         noteDynamicInput()
         draftText = ""
+        clearDraftAppleTranslation()
 
         let metrics = LectureSegmentMetrics.make(pcmData: pcm, text: sherpaText)
         if !isAccentPlaceholder {
@@ -1403,6 +1776,7 @@ final class TranscriptionViewModel: ObservableObject {
                 zone: .dynamic
             )
             dynamicItems.append(newItem)
+            requestAppleRealtimeTranslation(uid: uid, sherpaText: sherpaText)
             enqueueLLMItem(
                 uid: uid,
                 text: sherpaText,
@@ -1423,6 +1797,7 @@ final class TranscriptionViewModel: ObservableObject {
         updateRefinementLoadState()
         let newItem = TranscriptionItem(id: uid, english: sherpaText, status: .whispering, zone: .dynamic)
         dynamicItems.append(newItem)
+        requestAppleRealtimeTranslation(uid: uid, sherpaText: sherpaText)
         renderUI(force: true)
     }
 
@@ -1443,6 +1818,7 @@ final class TranscriptionViewModel: ObservableObject {
             if let label = labels[dynamicItems[idx].id],
                dynamicItems[idx].speakerID != label {
                 dynamicItems[idx].speakerID = label
+                persistLiveSegment(dynamicItems[idx])
                 changed = true
             }
         }
@@ -1451,6 +1827,7 @@ final class TranscriptionViewModel: ObservableObject {
             if let label = labels[historyItems[idx].id],
                historyItems[idx].speakerID != label {
                 historyItems[idx].speakerID = label
+                persistLiveSegment(historyItems[idx])
                 changed = true
             }
         }
@@ -1458,6 +1835,22 @@ final class TranscriptionViewModel: ObservableObject {
         if changed {
             refreshTranslationOnlyHistoryBlocks(forceAgnes: true)
             renderUI(force: true)
+        }
+    }
+
+    private func persistLiveSegment(_ item: TranscriptionItem) {
+        guard let timing = timedSegments[item.id], let context = sessionContext else { return }
+        Task { [sessionCoordinator, context] in
+            try? await sessionCoordinator?.upsert(
+                context: context,
+                id: item.id,
+                startTime: timing.start,
+                endTime: timing.end,
+                draft: timing.draft,
+                refined: item.english,
+                speakerID: item.speakerID,
+                status: item.isVisible && item.status != .dropped ? .succeeded : .cancelled
+            )
         }
     }
 
@@ -1635,8 +2028,7 @@ final class TranscriptionViewModel: ObservableObject {
                         await MainActor.run {
                             self.refinementLoadState = .localFallback
                         }
-                        let denoisedPCM = await self.speechDenoiserService.denoise(pcmData: pcm) ?? pcm
-                        let localText = await self.whisperKitService.transcribe(pcmData: denoisedPCM)
+                        let localText = await self.whisperKitService.transcribe(pcmData: pcm)
                         finalText = self.isUsableWhisperText(localText, sherpaBackup: sherpaBackup)
                             ? (localText ?? sherpaBackup)
                             : sherpaBackup
@@ -1861,6 +2253,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func hideOrganizerItem(uid: UUID) {
+        removeAppleRealtimeTranslation(for: uid)
         if let idx = dynamicItems.firstIndex(where: { $0.id == uid }) {
             dynamicItems[idx].isVisible = false
             dynamicItems[idx].status = .dropped
@@ -1875,6 +2268,7 @@ final class TranscriptionViewModel: ObservableObject {
         guard let idx = dynamicItems.firstIndex(where: { $0.id == uid }) else { return }
         let now = Date().timeIntervalSince1970
         dynamicItems[idx].english = text
+        persistLiveSegment(dynamicItems[idx])
         try? sessionRecoveryJournal.recordRefinement(uid: uid, english: text)
         dynamicItems[idx].doneTime = now
         if translationEnabled {
@@ -1894,7 +2288,13 @@ final class TranscriptionViewModel: ObservableObject {
                 }
                 guard let (uid, text) = pair else { try? await Task.sleep(nanoseconds: 100_000_000); continue }
                 let credential = await MainActor.run { s.groqCoreCredential() }
-                await s.translationService.translate(uid: uid, englishText: text, groqCredential: credential)
+                let mode = await MainActor.run { s.translationExecutionMode }
+                await s.translationService.translate(
+                    uid: uid,
+                    englishText: text,
+                    groqCredential: credential,
+                    mode: mode
+                )
             }
         }
         translationWorkerTask1 = Task { [weak self] in guard let self else { return }; await worker(self) }
@@ -1989,6 +2389,7 @@ final class TranscriptionViewModel: ObservableObject {
             return
         }
         dynamicItems[idx].english = t
+        persistLiveSegment(dynamicItems[idx])
         dynamicItems[idx].status = .organizing
         let now = Date().timeIntervalSince1970
         dynamicItems[idx].doneTime = now
@@ -1997,6 +2398,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     func applyTranslation(uid: UUID, zhText: String) {
+        removeAppleRealtimeTranslation(for: uid)
         let now = Date().timeIntervalSince1970
         if let idx = dynamicItems.firstIndex(where: { $0.id == uid }) {
             dynamicItems[idx].chinese = zhText
@@ -2018,6 +2420,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func markAsDropped(uid: UUID) {
+        removeAppleRealtimeTranslation(for: uid)
         guard let idx = dynamicItems.firstIndex(where: { $0.id == uid }) else { return }
         dynamicItems[idx].isVisible = false
         dynamicItems[idx].status = .dropped
@@ -2039,6 +2442,7 @@ final class TranscriptionViewModel: ObservableObject {
         let clearedDraft = !draftText.isEmpty
         if clearedDraft {
             draftText = ""
+            clearDraftAppleTranslation()
         }
 
         if movedToHistory {
@@ -2149,6 +2553,7 @@ final class TranscriptionViewModel: ObservableObject {
 
     private func moveDynamicItemToHistory(at index: Int) {
         var item = dynamicItems[index]
+        removeAppleRealtimeTranslation(for: item.id)
         item.zone = .history
         if item.status == .translating {
             item.status = .done
@@ -2457,8 +2862,11 @@ final class TranscriptionViewModel: ObservableObject {
         let on = translationEnabled
         let summary = liveSummaryText
         let format = noteFileFormat
+        let aliases = currentSessionSpeakerAliases()
+        let exporter = noteExportService
         DispatchQueue.global(qos: .utility).async {
-            Self.writeFile(to: path, course: course, translationEnabled: on, items: items, finalSummary: summary, format: format)
+            guard let path else { return }
+            try? exporter.export(course: course, translationEnabled: on, items: items, finalSummary: summary, speakerAliases: aliases, format: format, to: path)
         }
     }
 
@@ -2469,35 +2877,32 @@ final class TranscriptionViewModel: ObservableObject {
         let items = self.historyItems + self.dynamicItems
         let summary = self.liveSummaryText
         let format = self.noteFileFormat
+        let aliases = currentSessionSpeakerAliases()
+        let exporter = noteExportService
         DispatchQueue.global(qos: .utility).async {
-            Self.writeFile(to: path, course: course, translationEnabled: on, items: items, finalSummary: summary, format: format)
+            guard let path else { return }
+            try? exporter.export(course: course, translationEnabled: on, items: items, finalSummary: summary, speakerAliases: aliases, format: format, to: path)
         }
     }
 
     private func writeFileNow() {
         guard let course = currentCourse else { return }
-        Self.writeFile(
-            to: filePath,
+        guard let filePath else { return }
+        try? noteExportService.export(
             course: course,
             translationEnabled: translationEnabled,
             items: historyItems + dynamicItems,
             finalSummary: liveSummaryText,
-            format: noteFileFormat
+            speakerAliases: currentSessionSpeakerAliases(),
+            format: noteFileFormat,
+            to: filePath
         )
     }
 
-    nonisolated private static func writeFile(to path: URL?, course: CourseSubject,
-                                               translationEnabled: Bool, items: [TranscriptionItem],
-                                               finalSummary: String, format: NoteFileFormat) {
-        guard let path else { return }
-        let content = SessionNoteRenderer.render(
-            course: course,
-            translationEnabled: translationEnabled,
-            items: items,
-            finalSummary: finalSummary,
-            format: format
-        )
-        try? content.write(to: path, atomically: true, encoding: .utf8)
+    private func currentSessionSpeakerAliases() -> [String: String] {
+        let meetingID = livePersistenceSession?.meetingID ?? selectedMeeting?.id
+        guard let meetingID else { return selectedMeetingSpeakerAliases }
+        return (try? meetingLibraryController?.aliases(meetingID: meetingID)) ?? selectedMeetingSpeakerAliases
     }
 
     private func maybeRequestLiveSummary() {
@@ -2522,15 +2927,26 @@ final class TranscriptionViewModel: ObservableObject {
         let previousSummary = liveSummaryText
         let countAtRequest = units.count
         let summaryService = nvidiaSummaryService
+        guard let template = summaryWorkspace?.selectedTemplate else { return }
+        guard let persistenceSession = livePersistenceSession, let summaryWorkspace else { return }
         isLiveSummaryUpdating = true
         liveSummaryStatus = "总结中"
 
         summaryTask = Task { [weak self] in
-            let summary = await summaryService.summarize(
+            let revision = try? await summaryWorkspace.generate(
+                meetingID: persistenceSession.meetingID,
+                transcriptRevisionID: persistenceSession.revisionID,
+                translationRevisionID: nil,
+                template: template,
+                provider: credential.provider.displayName,
+                model: credential.provider.modelName,
                 previousSummary: previousSummary,
-                newContent: newContent,
-                credential: credential
-            )
+                sourceContent: newContent,
+                isFinal: false
+            ) { prompt in
+                await summaryService.summarize(prompt: prompt, credential: credential, isFinal: false)
+            }
+            let summary = revision?.status == .succeeded ? revision?.body : nil
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -2581,6 +2997,14 @@ final class TranscriptionViewModel: ObservableObject {
         includeUntranslated: Bool = false
     ) -> [LiveSummarySourceUnit] {
         let block = TranscriptDisplayBlock(item: item)
+        let speakerPrefix: String = {
+            guard let speakerID = item.speakerID else { return "" }
+            let aliases: [String: String]
+            if let session = livePersistenceSession {
+                aliases = (try? meetingLibraryController?.aliases(meetingID: session.meetingID)) ?? [:]
+            } else { aliases = selectedMeetingSpeakerAliases }
+            return "\(aliases[speakerID] ?? SpeakerDisplayName.displayName(for: speakerID))："
+        }()
         if translationEnabled, block.chineseLines.isEmpty, !includeUntranslated {
             return []
         }
@@ -2588,7 +3012,7 @@ final class TranscriptionViewModel: ObservableObject {
         if block.canInterleaveLineByLine {
             return block.englishLines.indices.map { idx in
                 LiveSummarySourceUnit(text: """
-                英文原文：\(block.englishLines[idx])
+                \(speakerPrefix)英文原文：\(block.englishLines[idx])
                 中文译文：\(block.chineseLines[idx])
                 """)
             }
@@ -2598,14 +3022,14 @@ final class TranscriptionViewModel: ObservableObject {
         let chinese = block.chineseLines.joined(separator: " ")
         if translationEnabled {
             guard !chinese.isEmpty else {
-                return includeUntranslated ? [LiveSummarySourceUnit(text: "英文原文：\(english)")] : []
+                return includeUntranslated ? [LiveSummarySourceUnit(text: "\(speakerPrefix)英文原文：\(english)")] : []
             }
             return [LiveSummarySourceUnit(text: """
-            英文原文：\(english)
+            \(speakerPrefix)英文原文：\(english)
             中文译文：\(chinese)
             """)]
         }
-        return [LiveSummarySourceUnit(text: "英文原文：\(english)")]
+        return [LiveSummarySourceUnit(text: "\(speakerPrefix)英文原文：\(english)")]
     }
 
     private func groqCoreCredential() -> LLMProviderCredential? {
@@ -2620,7 +3044,10 @@ final class TranscriptionViewModel: ObservableObject {
         guard providerCheckResults.first(where: { $0.provider.id == .agnes })?.passed == true else {
             return nil
         }
-        return LLMProviderCatalog.agnesOrganizerCredential(from: providerAPIKeys)
+        return LLMProviderCatalog.agnesOrganizerCredential(
+            from: providerAPIKeys,
+            selectedModelNames: selectedProviderModelNames
+        )
     }
 
     private func groqAPIKey() -> String {

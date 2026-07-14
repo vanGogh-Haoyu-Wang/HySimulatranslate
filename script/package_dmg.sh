@@ -23,7 +23,6 @@ APP_SUPPORT_MODEL_ROOT="$HOME/Library/Application Support/HySimulatranslate/Mode
 SHERPA_MODEL_SOURCE="${SHERPA_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/Sherpa/sherpa-onnx-streaming-zipformer-en-2023-06-26}"
 WHISPER_MODEL_SOURCE="${WHISPER_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/WhisperKit/openai_whisper-large-v3}"
 VAD_MODEL_SOURCE="${VAD_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/VAD/silero_vad.onnx}"
-DENOISER_MODEL_SOURCE="${DENOISER_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/Denoise/gtcrn_simple.onnx}"
 
 usage() {
   echo "usage: $0 [package|--verify|verify]" >&2
@@ -63,7 +62,6 @@ validate_inputs() {
   require_dir "$WHISPER_MODEL_SOURCE/TextDecoder.mlmodelc" "WhisperKit TextDecoder.mlmodelc"
 
   require_file "$VAD_MODEL_SOURCE" "VAD model source"
-  require_file "$DENOISER_MODEL_SOURCE" "Speech denoiser model source"
 }
 
 write_info_plist() {
@@ -111,12 +109,10 @@ copy_payload() {
   mkdir -p "$PAYLOAD_DIR/Models/Sherpa" \
     "$PAYLOAD_DIR/Models/WhisperKit" \
     "$PAYLOAD_DIR/Models/VAD" \
-    "$PAYLOAD_DIR/Models/Denoise" \
     "$PAYLOAD_DIR/Scripts"
   ditto "$SHERPA_MODEL_SOURCE" "$PAYLOAD_DIR/Models/Sherpa/$(basename "$SHERPA_MODEL_SOURCE")"
   ditto "$WHISPER_MODEL_SOURCE" "$PAYLOAD_DIR/Models/WhisperKit/$(basename "$WHISPER_MODEL_SOURCE")"
   ditto "$VAD_MODEL_SOURCE" "$PAYLOAD_DIR/Models/VAD/$(basename "$VAD_MODEL_SOURCE")"
-  ditto "$DENOISER_MODEL_SOURCE" "$PAYLOAD_DIR/Models/Denoise/$(basename "$DENOISER_MODEL_SOURCE")"
   ditto "$ROOT_DIR/script" "$PAYLOAD_DIR/Scripts"
 }
 
@@ -173,7 +169,6 @@ verify_artifact() {
   require_dir "$PAYLOAD_DIR/Models/Sherpa/$(basename "$SHERPA_MODEL_SOURCE")" "Bundled Sherpa model"
   require_dir "$PAYLOAD_DIR/Models/WhisperKit/$(basename "$WHISPER_MODEL_SOURCE")" "Bundled WhisperKit model"
   require_file "$PAYLOAD_DIR/Models/VAD/$(basename "$VAD_MODEL_SOURCE")" "Bundled VAD model"
-  require_file "$PAYLOAD_DIR/Models/Denoise/$(basename "$DENOISER_MODEL_SOURCE")" "Bundled speech denoiser model"
   require_dir "$PAYLOAD_DIR/Scripts" "Bundled scripts"
   require_dir "$APP_FRAMEWORKS" "Bundled frameworks"
   require_glob "$APP_FRAMEWORKS/*.dylib" "Bundled dylibs"

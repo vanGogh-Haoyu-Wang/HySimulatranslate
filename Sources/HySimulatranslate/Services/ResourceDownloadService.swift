@@ -26,9 +26,6 @@ enum ResourceDownloadService {
     static let vadModelURL = URL(
         string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\(AppResourceLocator.vadModelFileName)"
     )!
-    static let speechDenoiserModelURL = URL(
-        string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/\(AppResourceLocator.speechDenoiserModelFileName)"
-    )!
 
     static func ensureSherpaModel(
         supportDirectory: URL = AppResourceLocator.defaultSupportDirectory(),
@@ -104,29 +101,6 @@ enum ResourceDownloadService {
             sourceURL: fileURL,
             supportDirectory: supportDirectory,
             statusName: "VAD",
-            onProgress: onProgress
-        )
-    }
-
-    static func ensureSpeechDenoiserModel(
-        supportDirectory: URL = AppResourceLocator.defaultSupportDirectory(),
-        bundledPayloadDirectory: URL? = AppResourceLocator.bundledPayloadDirectory(),
-        fileURL: URL = speechDenoiserModelURL,
-        onProgress: ProgressHandler? = nil
-    ) async throws -> URL {
-        if let existing = AppResourceLocator.speechDenoiserModelFile(
-            supportDirectory: supportDirectory,
-            bundledPayloadDirectory: bundledPayloadDirectory
-        ) {
-            onProgress?(1.0, "降噪模型已就绪")
-            return existing
-        }
-
-        return try await ensureSingleFileModel(
-            relativePath: AppResourceLocator.speechDenoiserModelRelativePath,
-            sourceURL: fileURL,
-            supportDirectory: supportDirectory,
-            statusName: "降噪",
             onProgress: onProgress
         )
     }

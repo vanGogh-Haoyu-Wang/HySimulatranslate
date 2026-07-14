@@ -172,7 +172,6 @@ struct LLMQueueItem {
 struct WhisperQueueItem {
     let uid: UUID
     var pcmData: Data
-    var denoisedPCMData: Data? = nil
     let sherpaTextBackup: String
     var whisperText: String? = nil
     var vadSpeechRatio: Double? = nil

@@ -12,9 +12,10 @@
 
 ## 功能
 
-- **实时语音转写** — sherpa-onnx 原始音频实时蹦字 + 本地 VAD/降噪旁路 + WhisperKit large-v3 本地精校
+- **实时语音转写** — sherpa-onnx 原始音频实时蹦字 + 本地 VAD 切段 + 云端 Whisper 精校，本地 WhisperKit large-v3 仅作故障灾备
+- **Apple 实时预览** — macOS 26+ 使用系统 Translation framework 为 Sherpa 蹦字提供低延迟中文预览，不写入历史墙或笔记
 - **LLM 文本格式化** — Groq API（llama-3.3-70b-versatile）智能修复标点、ASR 错误、句子拼接
-- **中英同传** — 从英文语音到中文译文的完整流水线
+- **中英同传** — 在线时保留分学科强化翻译；完全断网时由 Apple 翻译 Whisper 精校后的正式句子
 - **强化专项** — 自定义学科关键词与会议 focus，提升专业术语识别准确率
 - **实时总结** — NVIDIA API（nemotron-super-49b-v1）逐段生成中文会议总结
 - **会话笔记** — 自动将转写+翻译+总结写入桌面 Markdown 笔记文件
@@ -25,23 +26,24 @@
 ## 处理流水线
 
 ```
-麦克风 (AVAudioEngine)
+麦克风 (AVAudioEngine) / 电脑音频 (ScreenCaptureKit)
   │  16kHz int16 PCM
   ▼
-sherpa-onnx 实时流式识别 ──→ draft text（蹦字区实时预览）
+sherpa-onnx 实时流式识别 ──→ 英文 draft + Apple 临时译文（仅蹦字区）
   │
-  ├─→ VAD + 本地降噪旁路（只用于切段和 Whisper 精校）
+  ├─→ VAD（只用于切段）
   │      │ 300-500ms pre-roll + 500-700ms hangover
   │      ▼
-  │    WhisperKit large-v3 本地优先精校
-  │      │ 仅在本地失败/质量差/云端优先模式时调用 Groq Whisper
+  │    Groq Whisper（最多两个并发 worker）
+  │      │ 网络/HTTP/超时/无效结果时才延迟加载本地 WhisperKit large-v3
   ▼
 动态候选区 ──→ Sherpa 草稿 + Whisper 候选 + 处理状态
   ▼
 Groq LLM 格式化 / 合并 ──→ 纠错、去重、分句
   │
   ▼
-Groq LLM 翻译（英→中）
+在线：分学科强化 + 云端翻译（英→中）
+断网：Apple 翻译 Whisper 精校句（英→简中）
   │
   ▼
 NVIDIA 实时总结 ──→ 中文摘要
@@ -59,8 +61,9 @@ NVIDIA 实时总结 ──→ 中文摘要
 | **操作系统** | macOS 14.0 (Sonoma) 或更高 |
 | **架构** | Apple Silicon (M1/M2/M3/M4) 或 Intel (需测试) |
 | **麦克风** | 系统麦克风权限 |
-| **网络** | 使用云端 LLM (Groq/NVIDIA) 需要网络连接；纯本地模式可选 |
-| **存储** | ~3 GB（sherpa-onnx 模型 + WhisperKit large-v3 模型 + VAD/降噪模型） |
+| **网络** | 使用云端 Whisper、分学科强化翻译和 NVIDIA 总结需要网络；断网时可使用本地转录与 Apple 翻译 |
+| **Apple 翻译** | 蹦字区实时译文与断网正式翻译需 macOS 26.0+，并通过自检确认系统语言模型可用 |
+| **存储** | ~3 GB（sherpa-onnx 模型 + WhisperKit large-v3 模型 + VAD 模型） |
 
 ---
 
@@ -85,11 +88,10 @@ NVIDIA 实时总结 ──→ 中文摘要
 
 WhisperKit 默认下载优化的 large-v3 变体 `large-v3-v20240930_626MB`，并继续兼容既有 `openai_whisper-large-v3` 目录。
 
-### VAD 与降噪模型
+### VAD 模型
 默认打包源路径：
 ```
 ~/Library/Application Support/HySimulatranslate/Models/VAD/silero_vad.onnx
-~/Library/Application Support/HySimulatranslate/Models/Denoise/gtcrn_simple.onnx
 ```
 
 ### sherpa-onnx C 库
@@ -114,7 +116,7 @@ cd HySimulatranslate
 bash script/download_dependencies.sh --all
 ```
 
-脚本会自动下载 sherpa-onnx 动态库、Sherpa 流式模型、Silero VAD、GTCRN 降噪模型和 WhisperKit large-v3 模型。
+脚本会自动下载 sherpa-onnx 动态库、Sherpa 流式模型、Silero VAD 和 WhisperKit large-v3 模型。
 
 ### 3. 编译
 
@@ -153,7 +155,6 @@ DMG 打开后，将 `HySimulatranslate.app` 拖到 `Applications`。这是第三
 SHERPA_MODEL_SOURCE="/path/to/sherpa-model" \
 WHISPER_MODEL_SOURCE="/path/to/openai_whisper-large-v3" \
 VAD_MODEL_SOURCE="/path/to/silero_vad.onnx" \
-DENOISER_MODEL_SOURCE="/path/to/gtcrn_simple.onnx" \
 bash script/package_dmg.sh --verify
 ```
 
@@ -175,13 +176,13 @@ bash script/package_dmg.sh --verify
 |------|------|
 | **左侧记录区** | 扫描笔记目录 `.txt` 文件，可新建记录、进入强化专项、打开设置 |
 | **中右主框** | 共享状态标题栏、当前会话历史墙、强化专项编辑、右侧笔记总结区 |
-| **底部蹦字区** | 横贯中右主框，显示实时 Sherpa 蹦字、VAD/Whisper 候选文本、模型菜单、开始/停止按钮 |
+| **底部蹦字区** | 横贯中右主框，显示实时 Sherpa 英文与 Apple 临时译文、VAD/Whisper 候选文本、开始/停止按钮 |
 | **右侧总结区** | 默认显示 NVIDIA 实时会议总结；打开左侧历史笔记时由笔记预览覆盖，关闭后恢复总结 |
 
 ### 设置项
 
 - **停顿时间** (0.2s–1.5s) — 控制 sherpa-onnx 的语音分段灵敏度
-- **Whisper 精校** — 本地优先 / 云端优先 / 仅本地
+- **Whisper 精校** — 固定智能混合策略：云端优先，本地 large-v3 只在云端明确失败时单路灾备
 - **模型** — 在同传页设置中选择 Groq 核心模型和 NVIDIA 总结模型，支持刷新 provider 模型列表；只展示免费/兼容模型，按推荐顺序排列，上次连通失败的模型沉底
 - **笔记位置** — 默认桌面，可改为任意本地文件夹
 - **外观** — 跟随系统 / 深色 / 浅色
@@ -235,11 +236,11 @@ HySimulatranslate/
 │           ├── SherpaService.swift      # sherpa-onnx 流式识别
 │           ├── WhisperKitService.swift  # WhisperKit 本地精校
 │           ├── VoiceActivityService.swift  # 本地 VAD 封装
-│           ├── SpeechDenoiserService.swift # 本地降噪封装
 │           ├── ChatRateLimiter.swift    # Groq 聊天请求限流
 │           ├── ResourceDownloadService.swift # 模型自动下载
 │           ├── LLMService.swift         # Groq LLM 格式化
 │           ├── TranslationService.swift # 翻译服务
+│           ├── AppleSystemTranslationService.swift # Apple 系统翻译会话
 │           ├── NvidiaSummaryService.swift  # NVIDIA 总结
 │           └── KeychainManager.swift    # API Key 钥匙串管理
 ├── Tests/
@@ -262,8 +263,9 @@ HySimulatranslate/
 | [WhisperKit](https://github.com/argmaxinc/WhisperKit) | 本地 Whisper large-v3 精校 |
 | [Groq API](https://groq.com/) | LLM 文本格式化 + 翻译 |
 | [NVIDIA API](https://build.nvidia.com/) | 中文会议总结 |
+| Apple Translation framework | Sherpa 临时译文与断网正式翻译 |
 | SwiftUI + AppKit | macOS 原生 UI |
-| AVFoundation / CoreAudio | 麦克风音频采集 |
+| AVFoundation / ScreenCaptureKit | 麦克风与电脑音频采集 |
 
 ---
 
