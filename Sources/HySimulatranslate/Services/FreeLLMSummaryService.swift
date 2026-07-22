@@ -1,8 +1,30 @@
 import Foundation
 
-actor NvidiaSummaryService {
-    func summarize(prompt: String, credential: LLMProviderCredential, isFinal: Bool) async -> String? {
-        normalizedSummary(from: await requestChatCompletion(
+enum FreeLLMSummaryError: LocalizedError, Equatable {
+    case http(Int, String)
+    case invalidResponse
+    case invalidContent
+    case network(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .http(let status, let detail): return "FreeLLMAPI HTTP \(status)：\(detail)"
+        case .invalidResponse: return "FreeLLMAPI 响应格式无效"
+        case .invalidContent: return "FreeLLMAPI 未返回有效摘要"
+        case .network(let detail): return "FreeLLMAPI 网络异常：\(detail)"
+        }
+    }
+}
+
+actor FreeLLMSummaryService {
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    func summarize(prompt: String, credential: LLMProviderCredential, isFinal: Bool) async throws -> String {
+        try normalizedSummary(from: await requestChatCompletion(
             credential: credential,
             prompt: prompt,
             maxTokens: isFinal ? 1800 : 900,
@@ -24,7 +46,7 @@ actor NvidiaSummaryService {
     }
 
     func testConnectivity(credential: LLMProviderCredential?) async -> LLMProviderCheckResult {
-        let provider = credential?.provider ?? LLMProviderCatalog.nvidiaSummaryProvider!
+        let provider = credential?.provider ?? LLMProviderCatalog.freeLLMSummaryProvider()!
         guard let credential else {
             return LLMProviderCheckResult(provider: provider, status: .notConfigured)
         }
@@ -42,7 +64,7 @@ actor NvidiaSummaryService {
                 status: trimmed.contains("正常") ? .passed : .failed("空响应")
             )
         case .failure(let reason):
-            return LLMProviderCheckResult(provider: credential.provider, status: .failed(reason))
+            return LLMProviderCheckResult(provider: credential.provider, status: .failed(reason.localizedDescription))
         }
     }
 
@@ -50,7 +72,7 @@ actor NvidiaSummaryService {
         previousSummary: String,
         newContent: String,
         credential: LLMProviderCredential
-    ) async -> String? {
+    ) async throws -> String {
         let prompt = LiveSummaryPrompt.make(previousSummary: previousSummary, newContent: newContent)
         let result = await requestChatCompletion(
             credential: credential,
@@ -58,7 +80,7 @@ actor NvidiaSummaryService {
             maxTokens: 900,
             timeout: credential.provider.timeout
         )
-        return normalizedSummary(from: result)
+        return try normalizedSummary(from: result)
     }
 
     func summarize(
@@ -66,9 +88,9 @@ actor NvidiaSummaryService {
         newContent: String,
         template: SummaryTemplateRecord,
         credential: LLMProviderCredential
-    ) async -> String? {
-        guard let prompt = try? Self.makePrompt(template: template, previousSummary: previousSummary, content: newContent, isFinal: false) else { return nil }
-        return normalizedSummary(from: await requestChatCompletion(
+    ) async throws -> String {
+        let prompt = try Self.makePrompt(template: template, previousSummary: previousSummary, content: newContent, isFinal: false)
+        return try normalizedSummary(from: await requestChatCompletion(
             credential: credential, prompt: prompt, maxTokens: 900,
             timeout: credential.provider.timeout
         ))
@@ -78,7 +100,7 @@ actor NvidiaSummaryService {
         previousSummary: String,
         fullContent: String,
         credential: LLMProviderCredential
-    ) async -> String? {
+    ) async throws -> String {
         let prompt = LiveSummaryPrompt.makeFinalDetailed(
             previousSummary: previousSummary,
             fullContent: fullContent
@@ -89,7 +111,7 @@ actor NvidiaSummaryService {
             maxTokens: 1800,
             timeout: 60.0
         )
-        return normalizedSummary(from: result)
+        return try normalizedSummary(from: result)
     }
 
     func summarizeFinalDetailed(
@@ -97,19 +119,20 @@ actor NvidiaSummaryService {
         fullContent: String,
         template: SummaryTemplateRecord,
         credential: LLMProviderCredential
-    ) async -> String? {
-        guard let prompt = try? Self.makePrompt(template: template, previousSummary: previousSummary, content: fullContent, isFinal: true) else { return nil }
-        return normalizedSummary(from: await requestChatCompletion(
+    ) async throws -> String {
+        let prompt = try Self.makePrompt(template: template, previousSummary: previousSummary, content: fullContent, isFinal: true)
+        return try normalizedSummary(from: await requestChatCompletion(
             credential: credential, prompt: prompt, maxTokens: 1800, timeout: 60
         ))
     }
 
-    private func normalizedSummary(from result: ChatCompletionResult) -> String? {
+    private func normalizedSummary(from result: ChatCompletionResult) throws -> String {
         switch result {
         case .success(let content):
-            return Self.normalizedSummaryContent(content)
-        case .failure:
-            return nil
+            guard let normalized = Self.normalizedSummaryContent(content) else { throw FreeLLMSummaryError.invalidContent }
+            return normalized
+        case .failure(let error):
+            throw error
         }
     }
 
@@ -135,7 +158,7 @@ actor NvidiaSummaryService {
 
     private enum ChatCompletionResult {
         case success(String)
-        case failure(String)
+        case failure(FreeLLMSummaryError)
     }
 
     private func requestChatCompletion(
@@ -144,6 +167,37 @@ actor NvidiaSummaryService {
         maxTokens: Int,
         timeout: TimeInterval
     ) async -> ChatCompletionResult {
+        let request = Self.makeRequest(credential: credential, prompt: prompt, maxTokens: maxTokens, timeout: timeout)
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResp = response as? HTTPURLResponse else {
+                return .failure(.invalidResponse)
+            }
+            guard httpResp.statusCode == 200 else {
+                let detail = Self.errorMessage(from: data)
+                    ?? HTTPURLResponse.localizedString(forStatusCode: httpResp.statusCode)
+                return .failure(.http(httpResp.statusCode, detail))
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let content = message["content"] as? String
+            else {
+                return .failure(.invalidResponse)
+            }
+            return .success(content)
+        } catch {
+            return .failure(.network(error.localizedDescription))
+        }
+    }
+
+    nonisolated static func makeRequest(
+        credential: LLMProviderCredential,
+        prompt: String,
+        maxTokens: Int,
+        timeout: TimeInterval
+    ) -> URLRequest {
         var request = URLRequest(url: credential.provider.chatCompletionsURL)
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
@@ -160,25 +214,15 @@ actor NvidiaSummaryService {
             "max_tokens": maxTokens
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return request
+    }
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResp = response as? HTTPURLResponse else {
-                return .failure("无 HTTP 响应")
-            }
-            guard httpResp.statusCode == 200 else {
-                return .failure("HTTP \(httpResp.statusCode)")
-            }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any],
-                  let content = message["content"] as? String
-            else {
-                return .failure("响应解析失败")
-            }
-            return .success(content)
-        } catch {
-            return .failure("网络异常")
-        }
+    nonisolated static func errorMessage(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = json["error"] as? [String: Any],
+              let message = error["message"] as? String
+        else { return nil }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

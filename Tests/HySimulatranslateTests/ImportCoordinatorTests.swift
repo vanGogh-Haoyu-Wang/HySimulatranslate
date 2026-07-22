@@ -171,6 +171,7 @@ struct ImportCoordinatorTests {
             options: .init(subjectID: nil, sourceLanguage: "en", translate: true, targetLanguage: "zh", whisperModel: "m", diarize: true))
         #expect(job.translationRevisionID != nil)
         #expect(await recorder.calls == ["diarize", "export"])
+        #expect(try meetings.fetch(id: meeting.id)?.exportedNotePath == URL(fileURLWithPath: "/tmp/Imported.md").standardizedFileURL.path)
     }
 
     @Test("postprocess failure preserves previous current pointers")
@@ -229,19 +230,19 @@ private struct CancellingTranscriber: ImportedAudioTranscribing {
     func transcribe(samples: [Float], sampleRate: Double, language: String, model: String) async throws -> String { throw CancellationError() }
 }
 private struct StubTranslator: ImportedAudioTranslating {
-    func translate(_ text: String, targetLanguage: String) async throws -> String { "译：\(text)" }
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async throws -> String { "译：\(text)" }
 }
 private struct FailingTranslator: ImportedAudioTranslating {
-    func translate(_ text: String, targetLanguage: String) async throws -> String { throw AudioImportError.unreadable("translation failed") }
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async throws -> String { throw AudioImportError.unreadable("translation failed") }
 }
 private actor HookRecorder: ImportedAudioPostProcessing {
     var calls: [String] = []
     func diarize(meetingID: UUID, transcriptRevisionID: UUID, snapshot: SessionAudioSnapshot) async throws { calls.append("diarize") }
-    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws { calls.append("export") }
+    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws -> URL { calls.append("export"); return URL(fileURLWithPath: "/tmp/Imported.md") }
 }
 private struct FailingPostProcessor: ImportedAudioPostProcessing {
     func diarize(meetingID: UUID, transcriptRevisionID: UUID, snapshot: SessionAudioSnapshot) async throws {}
-    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws { throw AudioImportError.unreadable("export failed") }
+    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws -> URL { throw AudioImportError.unreadable("export failed") }
 }
 private actor TranscriberSpy: ImportedAudioTranscribing {
     var lastRate: Double = 0; var lastCount = 0; var lastLanguage = ""; var lastModel = ""; var callCount = 0

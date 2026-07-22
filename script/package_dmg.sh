@@ -108,12 +108,10 @@ PLIST
 copy_payload() {
   mkdir -p "$PAYLOAD_DIR/Models/Sherpa" \
     "$PAYLOAD_DIR/Models/WhisperKit" \
-    "$PAYLOAD_DIR/Models/VAD" \
-    "$PAYLOAD_DIR/Scripts"
+    "$PAYLOAD_DIR/Models/VAD"
   ditto "$SHERPA_MODEL_SOURCE" "$PAYLOAD_DIR/Models/Sherpa/$(basename "$SHERPA_MODEL_SOURCE")"
   ditto "$WHISPER_MODEL_SOURCE" "$PAYLOAD_DIR/Models/WhisperKit/models/argmaxinc/whisperkit-coreml/$(basename "$WHISPER_MODEL_SOURCE")"
   ditto "$VAD_MODEL_SOURCE" "$PAYLOAD_DIR/Models/VAD/$(basename "$VAD_MODEL_SOURCE")"
-  ditto "$ROOT_DIR/script" "$PAYLOAD_DIR/Scripts"
 }
 
 build_app() {
@@ -169,7 +167,6 @@ verify_artifact() {
   require_dir "$PAYLOAD_DIR/Models/Sherpa/$(basename "$SHERPA_MODEL_SOURCE")" "Bundled Sherpa model"
   require_dir "$PAYLOAD_DIR/Models/WhisperKit/models/argmaxinc/whisperkit-coreml/$(basename "$WHISPER_MODEL_SOURCE")" "Bundled WhisperKit model"
   require_file "$PAYLOAD_DIR/Models/VAD/$(basename "$VAD_MODEL_SOURCE")" "Bundled VAD model"
-  require_dir "$PAYLOAD_DIR/Scripts" "Bundled scripts"
   require_dir "$APP_FRAMEWORKS" "Bundled frameworks"
   require_glob "$APP_FRAMEWORKS/*.dylib" "Bundled dylibs"
   codesign --verify --deep --strict "$APP_BUNDLE"

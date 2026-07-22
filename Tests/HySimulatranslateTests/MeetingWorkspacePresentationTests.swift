@@ -22,6 +22,45 @@ struct MeetingWorkspacePresentationTests {
         #expect(vm.notePreviewStatus == "已载入")
     }
 
+    @MainActor @Test("linked live meeting keeps meeting selection and loads note while defaulting to summary")
+    func linkedLiveMeetingLoadsNoteWithoutReplacingMeeting() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("linked.md")
+        try "# Linked note".write(to: url, atomically: true, encoding: .utf8)
+        let meeting = MeetingRecord(title: "Live", source: .live, exportedNotePath: url.path)
+        let vm = TranscriptionViewModel()
+
+        await vm.selectMeetingForNavigation(meeting)
+
+        #expect(vm.selectedMeeting?.id == meeting.id)
+        #expect(vm.selectedNoteRecord?.url.standardizedFileURL == url.standardizedFileURL)
+        #expect(vm.meetingRightPanelMode == .summary)
+        vm.meetingRightPanelMode = .note
+        #expect(vm.selectedMeeting?.id == meeting.id)
+        #expect(vm.notePreviewText.contains("Linked note"))
+    }
+
+    @MainActor @Test("missing linked note can be re-exported without replacing the meeting")
+    func missingLinkedNoteCanBeReexported() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("missing.md")
+        let meeting = MeetingRecord(title: "Recovered", source: .live, exportedNotePath: url.path)
+        let vm = TranscriptionViewModel()
+        await vm.selectMeetingForNavigation(meeting)
+        #expect(vm.notePreviewStatus.contains("读取失败"))
+
+        await vm.reexportSelectedMeetingNote()
+
+        #expect(vm.selectedMeeting?.id == meeting.id)
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(vm.notePreviewStatus == "已载入")
+        #expect(vm.notePreviewText.contains("Recovered"))
+    }
+
     @Test("meeting actions reflect actual audio and successful transcript availability")
     func meetingActionsReflectAvailableData() {
         let meeting = MeetingRecord(title: "Legacy", source: .legacyImported, legacyNotePath: "/tmp/note.md")
@@ -43,14 +82,10 @@ struct MeetingWorkspacePresentationTests {
         let state = AudioImportFormState()
         #expect(state.sourceLanguage == .english)
         #expect(state.targetLanguage == .chinese)
-        #expect(state.transcriptionModel == .whisperKitLargeV3)
         #expect(AudioImportLanguageOption.english.title == "英语")
         #expect(AudioImportLanguageOption.chinese.title == "中文")
         #expect(AudioImportLanguageOption.english.code == "en")
         #expect(AudioImportLanguageOption.chinese.code == "zh")
-        #expect(AudioTranscriptionModelOption.allCases == [.whisperKitLargeV3])
-        #expect(AudioTranscriptionModelOption.whisperKitLargeV3.provider == .whisperKit)
-        #expect(AudioTranscriptionModelOption.whisperKitLargeV3.title == "WhisperKit Large V3（本地）")
         #expect(state.makeOptions().sourceLanguage == "en")
         #expect(state.makeOptions().targetLanguage == "zh")
         #expect(state.makeOptions().whisperModel == WhisperKitService.defaultModel)

@@ -45,6 +45,10 @@ final class AppDatabase {
                 for template in builtInTemplates { try template.insert(db) }
             }
         }
+        migrator.registerMigration("v5-exported-note-path") { db in
+            try db.alter(table: "meetings") { $0.add(column: "exportedNotePath", .text) }
+            try db.create(index: "meetings_exportedNotePath", on: "meetings", columns: ["exportedNotePath"], unique: true)
+        }
         return migrator
     }
 

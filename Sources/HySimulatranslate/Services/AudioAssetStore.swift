@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 
 struct SessionAudioAssets: Equatable, Sendable {
@@ -44,22 +43,19 @@ final class AudioAssetStore: @unchecked Sendable {
         try mixedWriter.write(samples: samples, at: startSample)
     }
 
-    func finalize(mixedSamples: [Float]) throws -> SessionAudioAssets {
+    func finalize(totalSamples: Int) throws -> SessionAudioAssets {
         if !isFinalized {
             try sourceWriters.values.forEach { try $0.finalize() }
             try mixedWriter.finalize()
             isFinalized = true
         }
-        let destination = directory.appendingPathComponent("mixed.m4a")
-        let encoded = try? Self.writeM4A(mixedSamples, sampleRate: sampleRate, to: destination)
-        let usableM4A = encoded == true ? destination : nil
         return SessionAudioAssets(
             sessionDirectory: directory,
             microphoneWAV: Self.wavURL(in: directory, for: .microphone),
             systemWAV: enabledSources.contains(.systemAudio) ? Self.wavURL(in: directory, for: .systemAudio) : nil,
             mixedWAV: directory.appendingPathComponent("mixed.wav"),
-            m4aURL: usableM4A,
-            totalSamples: mixedSamples.count
+            m4aURL: nil,
+            totalSamples: totalSamples
         )
     }
 
@@ -67,34 +63,6 @@ final class AudioAssetStore: @unchecked Sendable {
         directory.appendingPathComponent(source == .microphone ? "microphone.wav" : "system.wav")
     }
 
-    private static func writeM4A(_ samples: [Float], sampleRate: Int, to destination: URL) throws -> Bool {
-        guard !samples.isEmpty,
-              let format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channels: 1),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
-        else { return false }
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { source in
-            buffer.floatChannelData?[0].update(from: source.baseAddress!, count: samples.count)
-        }
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 64_000
-        ]
-        let temporary = destination.deletingPathExtension().appendingPathExtension("tmp.m4a")
-        try? FileManager.default.removeItem(at: temporary)
-        do {
-            let file = try AVAudioFile(forWriting: temporary, settings: settings)
-            try file.write(from: buffer)
-        }
-        let verification = try AVAudioFile(forReading: temporary)
-        guard verification.length > 0 else { throw CocoaError(.fileReadCorruptFile) }
-        if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
-        try FileManager.default.moveItem(at: temporary, to: destination)
-        let finalVerification = try AVAudioFile(forReading: destination)
-        return finalVerification.length > 0
-    }
 }
 
 private final class IncrementalMonoWAVWriter {

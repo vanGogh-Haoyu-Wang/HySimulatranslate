@@ -47,6 +47,13 @@ enum WorkspaceMode: Equatable {
     case settings
 }
 
+enum MeetingRightPanelMode: String, CaseIterable, Identifiable {
+    case summary
+    case note
+    var id: String { rawValue }
+    var title: String { self == .summary ? "摘要" : "笔记" }
+}
+
 enum HistoryDisplayMode: String, CaseIterable, Identifiable {
     case bilingual
     case translationOnly
@@ -143,18 +150,6 @@ struct CourseSubject: Identifiable, Codable, Equatable, Sendable {
 enum LLMTaskType: String {
     case format
     case aggregate
-}
-
-enum WhisperRefinementMode: String, CaseIterable, Identifiable {
-    case smartHybrid
-
-    var id: String { rawValue }
-
-    var title: String { "智能混合" }
-
-    static func fromStorageValue(_ value: String?) -> WhisperRefinementMode {
-        .smartHybrid
-    }
 }
 
 struct LLMQueueItem {

@@ -6,9 +6,8 @@ final class SessionAudioPipeline: @unchecked Sendable {
     private let maximumAlignmentLatencySamples: Int
     private let assetStore: AudioAssetStore
     private let lock = NSLock()
-    private var tracks: [AudioChunkSource: [Float]] = [:]
+    private var tracks: [AudioChunkSource: PendingAudioTrack] = [:]
     private var receivedEnds: [AudioChunkSource: Int] = [:]
-    private var mixed: [Float] = []
     private var committedSampleCount = 0
     private var finalizedAssets: SessionAudioAssets?
     private var resamplingStates: [AudioChunkSource: SourceResamplingState] = [:]
@@ -24,9 +23,17 @@ final class SessionAudioPipeline: @unchecked Sendable {
         precondition(!enabledSources.isEmpty)
         self.outputSampleRate = outputSampleRate
         self.enabledSources = enabledSources
-        self.maximumAlignmentLatencySamples = max(0, Int((maximumAlignmentLatency * Double(outputSampleRate)).rounded()))
-        self.assetStore = try AudioAssetStore(sessionID: sessionID, rootDirectory: rootDirectory, sampleRate: outputSampleRate, enabledSources: enabledSources)
-        for source in enabledSources { tracks[source] = []; receivedEnds[source] = 0 }
+        maximumAlignmentLatencySamples = max(0, Int((maximumAlignmentLatency * Double(outputSampleRate)).rounded()))
+        assetStore = try AudioAssetStore(
+            sessionID: sessionID,
+            rootDirectory: rootDirectory,
+            sampleRate: outputSampleRate,
+            enabledSources: enabledSources
+        )
+        for source in enabledSources {
+            tracks[source] = PendingAudioTrack()
+            receivedEnds[source] = 0
+        }
     }
 
     func accept(_ chunk: AudioChunk) throws -> [Float] {
@@ -40,6 +47,7 @@ final class SessionAudioPipeline: @unchecked Sendable {
         var converted = state.resampler.process(chunk.samples)
         state.expectedNextInputTime = chunk.sessionStartTime + Double(chunk.samples.count) / Double(chunk.sampleRate)
         resamplingStates[chunk.source] = state
+
         var start = startBeforeCropping
         if start < committedSampleCount {
             let committedPrefix = min(converted.count, committedSampleCount - start)
@@ -47,10 +55,8 @@ final class SessionAudioPipeline: @unchecked Sendable {
             start += committedPrefix
         }
         guard !converted.isEmpty else { return [] }
-        var track = tracks[chunk.source] ?? []
-        if track.count < start + converted.count { track.append(contentsOf: repeatElement(0, count: start + converted.count - track.count)) }
-        for index in converted.indices { track[start + index] = converted[index] }
-        tracks[chunk.source] = track
+
+        tracks[chunk.source, default: PendingAudioTrack()].write(converted, at: start)
         receivedEnds[chunk.source] = max(receivedEnds[chunk.source] ?? 0, start + converted.count)
         try assetStore.persist(source: chunk.source, samples: converted, at: start)
 
@@ -58,44 +64,39 @@ final class SessionAudioPipeline: @unchecked Sendable {
         let furthestReceived = receivedEnds.values.max() ?? 0
         let boundedWatermark = max(0, furthestReceived - maximumAlignmentLatencySamples)
         let commitEnd = min(furthestReceived, max(normalWatermark, boundedWatermark))
-        guard commitEnd > committedSampleCount else { return [] }
-        var emitted: [Float] = []
-        emitted.reserveCapacity(commitEnd - committedSampleCount)
-        for index in committedSampleCount..<commitEnd {
-            let sum = enabledSources.reduce(Float.zero) { partial, source in
-                partial + ((tracks[source]?.indices.contains(index) == true) ? tracks[source]![index] : 0)
-            }
-            emitted.append(max(-1, min(1, sum)))
-        }
-        mixed.append(contentsOf: emitted)
-        committedSampleCount = commitEnd
-        try assetStore.persistMixed(samples: emitted, at: committedSampleCount - emitted.count)
-        return emitted
+        return try commit(upTo: commitEnd)
     }
 
     func finalize() throws -> SessionAudioAssets {
         lock.lock(); defer { lock.unlock() }
         if let finalizedAssets { return finalizedAssets }
-        let maximumEnd = receivedEnds.values.max() ?? 0
-        let previouslyPersistedMixedCount = mixed.count
-        if maximumEnd > committedSampleCount {
-            for index in committedSampleCount..<maximumEnd {
-                let sum = enabledSources.reduce(Float.zero) { partial, source in
-                    partial + ((tracks[source]?.indices.contains(index) == true) ? tracks[source]![index] : 0)
-                }
-                mixed.append(max(-1, min(1, sum)))
-            }
-            committedSampleCount = maximumEnd
-        }
-        if mixed.count > previouslyPersistedMixedCount {
-            try assetStore.persistMixed(
-                samples: Array(mixed[previouslyPersistedMixedCount..<mixed.count]),
-                at: previouslyPersistedMixedCount
-            )
-        }
-        let assets = try assetStore.finalize(mixedSamples: mixed)
+        _ = try commit(upTo: receivedEnds.values.max() ?? 0)
+        let assets = try assetStore.finalize(totalSamples: committedSampleCount)
         finalizedAssets = assets
         return assets
+    }
+
+    var bufferedSampleCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return tracks.values.reduce(0) { $0 + $1.samples.count }
+    }
+
+    private func commit(upTo end: Int) throws -> [Float] {
+        guard end > committedSampleCount else { return [] }
+        var emitted: [Float] = []
+        emitted.reserveCapacity(end - committedSampleCount)
+        for index in committedSampleCount..<end {
+            let sum = enabledSources.reduce(Float.zero) { partial, source in
+                partial + (tracks[source]?.sample(at: index) ?? 0)
+            }
+            emitted.append(max(-1, min(1, sum)))
+        }
+        try assetStore.persistMixed(samples: emitted, at: committedSampleCount)
+        committedSampleCount = end
+        for source in enabledSources {
+            tracks[source]?.discard(before: committedSampleCount)
+        }
+        return emitted
     }
 
     private func resamplingState(for chunk: AudioChunk) -> SourceResamplingState {
@@ -120,6 +121,42 @@ final class SessionAudioPipeline: @unchecked Sendable {
             case .invalidChunk: return "音频块参数无效"
             }
         }
+    }
+}
+
+private struct PendingAudioTrack {
+    private(set) var origin = 0
+    private(set) var samples: [Float] = []
+
+    mutating func write(_ values: [Float], at start: Int) {
+        guard !values.isEmpty else { return }
+        if samples.isEmpty {
+            origin = start
+            samples = values
+            return
+        }
+        if start < origin {
+            samples.insert(contentsOf: repeatElement(0, count: origin - start), at: 0)
+            origin = start
+        }
+        let offset = start - origin
+        if samples.count < offset + values.count {
+            samples.append(contentsOf: repeatElement(0, count: offset + values.count - samples.count))
+        }
+        samples.replaceSubrange(offset..<(offset + values.count), with: values)
+    }
+
+    func sample(at index: Int) -> Float? {
+        let offset = index - origin
+        return samples.indices.contains(offset) ? samples[offset] : nil
+    }
+
+    mutating func discard(before index: Int) {
+        let count = min(samples.count, max(0, index - origin))
+        guard count > 0 else { return }
+        samples.removeFirst(count)
+        origin += count
+        if samples.isEmpty { origin = index }
     }
 }
 

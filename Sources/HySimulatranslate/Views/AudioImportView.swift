@@ -22,26 +22,12 @@ enum AudioImportLanguageOption: String, CaseIterable, Identifiable {
     }
 }
 
-enum AudioTranscriptionProvider: String, Equatable {
-    case whisperKit
-}
-
-enum AudioTranscriptionModelOption: String, CaseIterable, Identifiable {
-    case whisperKitLargeV3
-
-    var id: String { rawValue }
-    var provider: AudioTranscriptionProvider { .whisperKit }
-    var modelID: String { WhisperKitService.defaultModel }
-    var title: String { "WhisperKit Large V3（本地）" }
-}
-
 struct AudioImportFormState: Equatable {
     var selectedSubjectID: UUID?
     var sourceLanguage: AudioImportLanguageOption = .english
     var targetLanguage: AudioImportLanguageOption = .chinese
     var shouldTranslate = true
     var shouldDiarize = true
-    var transcriptionModel: AudioTranscriptionModelOption = .whisperKitLargeV3
 
     func makeOptions() -> ImportOptions {
         ImportOptions(
@@ -49,7 +35,7 @@ struct AudioImportFormState: Equatable {
             sourceLanguage: sourceLanguage.code,
             translate: shouldTranslate,
             targetLanguage: targetLanguage.code,
-            whisperModel: transcriptionModel.modelID,
+            whisperModel: WhisperKitService.defaultModel,
             diarize: shouldDiarize
         )
     }
@@ -104,6 +90,11 @@ struct AudioImportWorkspaceView: View {
                                         Text(language.title).tag(language)
                                     }
                                 }
+                                .onChange(of: form.sourceLanguage) { _, source in
+                                    if form.targetLanguage == source {
+                                        form.targetLanguage = source == .english ? .chinese : .english
+                                    }
+                                }
                                 Picker("目标语言", selection: $form.targetLanguage) {
                                     ForEach(AudioImportLanguageOption.allCases) { language in
                                         Text(language.title).tag(language)
@@ -119,11 +110,8 @@ struct AudioImportWorkspaceView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             Toggle("生成翻译", isOn: $form.shouldTranslate)
                             Toggle("说话人分离", isOn: $form.shouldDiarize)
-                            Picker("转写模型", selection: $form.transcriptionModel) {
-                                ForEach(AudioTranscriptionModelOption.allCases) { model in
-                                    Text(model.title).tag(model)
-                                }
-                            }
+                            Text("转写模型：WhisperKit Large V3（本地）")
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 6)
                     }
@@ -157,7 +145,10 @@ struct AudioImportWorkspaceView: View {
                     }
                     Button(isImporting ? "处理中…" : "开始转写") { startImport() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!AudioImportFormState.canStart(selectedURL: selectedURL, isImporting: isImporting))
+                        .disabled(
+                            !AudioImportFormState.canStart(selectedURL: selectedURL, isImporting: isImporting)
+                            || (form.shouldTranslate && form.sourceLanguage == form.targetLanguage)
+                        )
                 }
             }
             .padding(.top, 12)

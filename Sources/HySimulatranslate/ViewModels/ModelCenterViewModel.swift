@@ -49,7 +49,7 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
             lastError = error.localizedDescription
         }
         rescan()
-        cloudProviders = LLMProviderID.allCases.map { .init(id: $0, configured: false, models: [], connectivity: .notConfigured) }
+        cloudProviders = LLMProviderCatalog.modelCenterProviderIDs.map { .init(id: $0, configured: false, models: [], connectivity: .notConfigured) }
     }
     func configureModelSelection(selectedModels: [LLMProviderID: String], onChange: @escaping @MainActor (LLMProviderID, String) -> Void) {
         selectedModelIDs = selectedModels
@@ -76,7 +76,7 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
     func rescan() { localResources = resourceService.scan() }
     func refreshCloud() async {
         let keys = providerKeys(); var result: [CloudModelProviderState] = []
-        for id in LLMProviderID.allCases {
+        for id in LLMProviderCatalog.modelCenterProviderIDs {
             guard let key = keys[id], !key.isEmpty else { result.append(.init(id: id, configured: false, models: [], connectivity: .notConfigured)); continue }
             do {
                 var models = try await cloudClient.fetchModels(providerID: id, apiKey: key)

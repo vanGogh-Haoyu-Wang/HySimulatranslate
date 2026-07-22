@@ -13,7 +13,7 @@ actor ImportedAudioPostProcessor: ImportedAudioPostProcessing {
         let labels = await diarization.diarizeSession(snapshot)
         for var segment in segments where labels[segment.id] != nil { segment.speakerID = labels[segment.id]; try transcripts.save(segment) }
     }
-    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws {
+    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws -> URL {
         try FileManager.default.createDirectory(at: exportDirectory, withIntermediateDirectories: true)
         let segments = try transcripts.fetchSegments(revisionID: transcriptRevisionID)
         let translations = translationRevisionID.map { try? transcripts.fetchTranslations(revisionID: $0) } ?? nil
@@ -26,5 +26,6 @@ actor ImportedAudioPostProcessor: ImportedAudioPostProcessing {
         let body = SessionNoteRenderer.render(course: course, translationEnabled: translationRevisionID != nil, items: items, finalSummary: "", speakerAliases: aliases, format: .markdown)
         let url = exportDirectory.appendingPathComponent("Imported-\(meetingID.uuidString).md")
         try body.write(to: url, atomically: true, encoding: .utf8)
+        return url
     }
 }

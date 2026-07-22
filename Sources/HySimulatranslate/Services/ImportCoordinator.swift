@@ -3,10 +3,12 @@ import Foundation
 protocol ImportedAudioTranscribing: Sendable {
     func transcribe(samples: [Float], sampleRate: Double, language: String, model: String) async throws -> String
 }
-protocol ImportedAudioTranslating: Sendable { func translate(_ text: String, targetLanguage: String) async throws -> String }
+protocol ImportedAudioTranslating: Sendable {
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async throws -> String
+}
 protocol ImportedAudioPostProcessing: Sendable {
     func diarize(meetingID: UUID, transcriptRevisionID: UUID, snapshot: SessionAudioSnapshot) async throws
-    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws
+    func export(meetingID: UUID, transcriptRevisionID: UUID, translationRevisionID: UUID?) async throws -> URL
 }
 
 struct AudioTimelineRange: Sendable, Equatable { var sampleRange: Range<Int>; var start: Double; var end: Double }
@@ -79,10 +81,15 @@ struct TranslationServiceImportAdapter: ImportedAudioTranslating {
     let service: TranslationService
     let appleTranslator: any AppleSystemTranslating
     let credential: LLMProviderCredential?
-    func translate(_ text: String, targetLanguage: String) async throws -> String {
-        let online = await service.robustTranslate(text, groqCredential: credential)
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async throws -> String {
+        let online = await service.robustTranslate(
+            text,
+            sourceLanguage: sourceLanguage,
+            targetLanguage: targetLanguage,
+            groqCredential: credential
+        )
         if !TranslationService.isCompleteTranslationFailure(online) { return online }
-        if let apple = await appleTranslator.translate(text) { return AppleTranslationTextNormalizer.simplifiedChinese(apple) }
+        if let apple = await appleTranslator.translate(text, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage) { return apple }
         throw AudioImportError.unreadable("在线翻译与 Apple 离线翻译均不可用")
     }
 }
@@ -104,11 +111,18 @@ actor ImportCoordinator {
         let providerLease = try modelUsage?.begin(owner: "retranslate", resourceIDs: [provider.lowercased()])
         defer { providerLease?.release() }
         guard let translator else { throw AudioImportError.unreadable("翻译服务不可用") }
+        guard let sourceRevision = try transcripts.fetchRevision(id: transcriptRevisionID) else {
+            throw PersistenceRepositoryError.missingRecord
+        }
         var revision = try transcripts.createTranslationRevision(meetingID: meetingID, transcriptRevisionID: transcriptRevisionID, targetLanguage: targetLanguage, provider: provider, model: model, status: .processing)
         do {
             for segment in try transcripts.fetchSegments(revisionID: transcriptRevisionID) {
                 try Task.checkCancellation()
-                let text = try await translator.translate(segment.refinedText, targetLanguage: targetLanguage)
+                let text = try await translator.translate(
+                    segment.refinedText,
+                    sourceLanguage: sourceRevision.language,
+                    targetLanguage: targetLanguage
+                )
                 try transcripts.insert(.init(translationRevisionID: revision.id, segmentID: segment.id, text: text))
             }
             revision.status = .succeeded; try transcripts.saveTranslationRevision(revision)
@@ -166,7 +180,10 @@ actor ImportCoordinator {
                 job.translationRevisionID = translation.id
             }
             if options.diarize, let snapshot = diarizationStore?.finalizeSnapshot() { try await postProcessor?.diarize(meetingID: meetingID, transcriptRevisionID: revision.id, snapshot: snapshot) }
-            try await postProcessor?.export(meetingID: meetingID, transcriptRevisionID: revision.id, translationRevisionID: job.translationRevisionID)
+            if let postProcessor {
+                let noteURL = try await postProcessor.export(meetingID: meetingID, transcriptRevisionID: revision.id, translationRevisionID: job.translationRevisionID)
+                try meetings.attachExportedNote(path: noteURL.path, to: meetingID)
+            }
             try transcripts.setCurrentImportRevisions(transcriptID: revision.id, translationID: job.translationRevisionID, for: meetingID)
             job.status = .succeeded; job.progress = 1; onProgress?(1)
         } catch is CancellationError {

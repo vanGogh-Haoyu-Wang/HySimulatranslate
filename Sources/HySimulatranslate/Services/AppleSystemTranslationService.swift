@@ -4,8 +4,28 @@ import Translation
 #endif
 
 protocol AppleSystemTranslating: Sendable {
-    func prepare() async -> Bool
-    func translate(_ text: String) async -> String?
+    func prepare(sourceLanguage: String, targetLanguage: String) async -> Bool
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async -> String?
+}
+
+extension AppleSystemTranslating {
+    func prepare() async -> Bool {
+        await prepare(sourceLanguage: "en", targetLanguage: "zh")
+    }
+
+    func translate(_ text: String) async -> String? {
+        await translate(text, sourceLanguage: "en", targetLanguage: "zh")
+    }
+}
+
+struct TranslationLanguagePair: Hashable, Sendable {
+    let source: String
+    let target: String
+
+    init(source: String, target: String) {
+        self.source = source.lowercased().hasPrefix("zh") ? "zh-Hans" : source
+        self.target = target.lowercased().hasPrefix("zh") ? "zh-Hans" : target
+    }
 }
 
 enum TranslationExecutionMode: Equatable, Sendable {
@@ -65,16 +85,18 @@ actor AppleTranslationRequestGate {
 }
 
 actor AppleSystemTranslationService: AppleSystemTranslating {
-    private var translationHandler: (@Sendable (String) async -> String?)?
+    private var translationHandlers: [TranslationLanguagePair: @Sendable (String) async -> String?] = [:]
 
-    func prepare() async -> Bool {
-        if translationHandler != nil { return true }
+    func prepare(sourceLanguage: String = "en", targetLanguage: String = "zh") async -> Bool {
+        let pair = TranslationLanguagePair(source: sourceLanguage, target: targetLanguage)
+        guard pair.source != pair.target else { return false }
+        if translationHandlers[pair] != nil { return true }
 
         #if canImport(Translation)
         if #available(macOS 26.0, *) {
-            let backend = AppleTranslationSessionBackend()
+            let backend = AppleTranslationSessionBackend(pair: pair)
             guard await backend.prepare() else { return false }
-            translationHandler = { text in
+            translationHandlers[pair] = { text in
                 await backend.translate(text)
             }
             return true
@@ -84,28 +106,39 @@ actor AppleSystemTranslationService: AppleSystemTranslating {
         return false
     }
 
-    func translate(_ text: String) async -> String? {
+    func translate(_ text: String, sourceLanguage: String = "en", targetLanguage: String = "zh") async -> String? {
         let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !source.isEmpty, let translationHandler else { return nil }
+        let pair = TranslationLanguagePair(source: sourceLanguage, target: targetLanguage)
+        if translationHandlers[pair] == nil {
+            guard await prepare(sourceLanguage: pair.source, targetLanguage: pair.target) else { return nil }
+        }
+        guard !source.isEmpty, let translationHandler = translationHandlers[pair] else { return nil }
         guard let translated = await translationHandler(source)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !translated.isEmpty
         else { return nil }
-        return AppleTranslationTextNormalizer.simplifiedChinese(translated)
+        return pair.target.lowercased().hasPrefix("zh")
+            ? AppleTranslationTextNormalizer.simplifiedChinese(translated)
+            : translated
     }
 }
 
 #if canImport(Translation)
 @available(macOS 26.0, *)
 private actor AppleTranslationSessionBackend {
+    private let pair: TranslationLanguagePair
     private var session: TranslationSession?
     private let requestGate = AppleTranslationRequestGate()
+
+    init(pair: TranslationLanguagePair) {
+        self.pair = pair
+    }
 
     func prepare() async -> Bool {
         if session != nil { return true }
 
-        let source = Locale.Language(identifier: "en")
-        let target = Locale.Language(identifier: "zh-Hans")
+        let source = Locale.Language(identifier: pair.source)
+        let target = Locale.Language(identifier: pair.target)
         let newSession: TranslationSession
         if #available(macOS 26.4, *) {
             newSession = TranslationSession(

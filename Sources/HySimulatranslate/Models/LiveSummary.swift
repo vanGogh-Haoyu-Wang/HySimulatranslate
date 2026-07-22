@@ -29,6 +29,7 @@ struct LiveSummaryCursor {
     }
 
     mutating func markFailed(at count: Int) {
+        summarizedCount = max(summarizedCount, count)
         failedAtCount = max(0, count)
     }
 

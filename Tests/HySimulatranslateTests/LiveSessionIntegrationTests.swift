@@ -17,6 +17,18 @@ struct LiveSessionIntegrationTests {
         #expect(revisions.first?.status == .succeeded)
     }
 
+    @Test("start associates the planned exported note path with the draft meeting")
+    func startAssociatesExportedNotePath() async throws {
+        let database = try AppDatabase.inMemory()
+        let integration = LiveSessionPersistence(database: database)
+        let note = URL(fileURLWithPath: "/tmp/../tmp/Meeting.md")
+
+        let session = try await integration.start(title: "Physics", subjectID: nil, exportedNotePath: note.path)
+
+        let meeting = try MeetingRepository(database: database).fetch(id: session.meetingID)
+        #expect(meeting?.exportedNotePath == note.standardizedFileURL.path)
+    }
+
     @Test("timed segment updates preserve identity and sequence")
     func upsertsTimedSegment() async throws {
         let database = try AppDatabase.inMemory()
@@ -138,6 +150,14 @@ struct MeetingLibraryPresentationTests {
         let url = URL(fileURLWithPath: "/tmp/indexed.md")
         let record = NoteRecord(url: url, fileName: "indexed.md", format: .markdown, modifiedAt: .distantPast, fileSize: 1, previewSummary: nil)
         let meeting = MeetingRecord(title: "indexed", source: .legacyImported, legacyNotePath: url.path)
+        #expect(TranscriptionViewModel.deduplicatedNoteRecords([record], meetings: [meeting]).isEmpty)
+    }
+
+    @Test("app exported notes are not shown as standalone note rows")
+    func exportedNotesAreDeduplicated() {
+        let url = URL(fileURLWithPath: "/tmp/exported.md")
+        let record = NoteRecord(url: url, fileName: "exported.md", format: .markdown, modifiedAt: .distantPast, fileSize: 1, previewSummary: nil)
+        let meeting = MeetingRecord(title: "live", source: .live, exportedNotePath: url.path)
         #expect(TranscriptionViewModel.deduplicatedNoteRecords([record], meetings: [meeting]).isEmpty)
     }
 

@@ -41,9 +41,17 @@ final class SummaryCoordinator {
         generator: (String) async throws -> String?
     ) async throws -> SummaryRevisionRecord {
         let prompt = try SummaryPromptRenderer.make(template: template, previousSummary: previousSummary, content: sourceContent, isFinal: isFinal)
-        let body = try await generator(prompt)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body: String?
+        let errorMessage: String?
+        do {
+            body = try await generator(prompt)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            errorMessage = (body ?? "").isEmpty ? "摘要服务未返回有效内容" : nil
+        } catch {
+            body = nil
+            errorMessage = error.localizedDescription
+        }
         let succeeded = !(body ?? "").isEmpty
-        let revision = SummaryRevisionRecord(meetingID: meetingID, transcriptRevisionID: transcriptRevisionID, translationRevisionID: translationRevisionID, templateID: template.id, provider: provider, model: model, body: body ?? "", status: succeeded ? .succeeded : .failed, errorMessage: succeeded ? nil : "摘要服务未返回有效内容")
+        let revision = SummaryRevisionRecord(meetingID: meetingID, transcriptRevisionID: transcriptRevisionID, translationRevisionID: translationRevisionID, templateID: template.id, provider: provider, model: model, body: body ?? "", status: succeeded ? .succeeded : .failed, errorMessage: errorMessage)
         try transcripts.insert(revision)
         if succeeded { try transcripts.setCurrentSummaryRevision(revision.id, for: meetingID) }
         return revision

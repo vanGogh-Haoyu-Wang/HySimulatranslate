@@ -19,6 +19,7 @@ struct MeetingRecord: Codable, FetchableRecord, PersistableRecord, Equatable {
     var currentTranslationRevisionID: UUID?
     var currentSummaryRevisionID: UUID?
     var legacyNotePath: String?
+    var exportedNotePath: String?
     var preview: String?
     var deletedAt: Date?
 }

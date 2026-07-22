@@ -14,7 +14,7 @@ struct SummaryWorkspaceView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("笔记总结区").font(.headline).foregroundStyle(.secondary)
-                Text("NVIDIA · \(modelName)").font(.caption).foregroundStyle(.secondary)
+                Text("FreeLLMAPI · \(modelName)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if isUpdating { ProgressView().scaleEffect(0.65).frame(width: 16, height: 16) }
             }
@@ -53,14 +53,9 @@ struct SummaryWorkspaceView: View {
                 }
                 .labelsHidden()
             }
-            if !workspace.failedSummaryRevisions.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("失败历史（不可选择）").font(.caption2).foregroundStyle(.secondary)
-                    ForEach(workspace.failedSummaryRevisions, id: \.id) { revision in
-                        Text("\(revision.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(revision.model) · \(revision.errorMessage ?? "生成失败")")
-                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
+            if let revision = workspace.failedSummaryRevisions.last {
+                Text("最近失败：\(revision.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(revision.errorMessage ?? "生成失败")（共 \(workspace.failedSummaryRevisions.count) 次）")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
 
             HStack(spacing: 5) {

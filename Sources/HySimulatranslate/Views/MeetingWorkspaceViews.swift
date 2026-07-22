@@ -117,6 +117,9 @@ struct MeetingSidebarView<VM: MeetingSidebarViewModel>: View {
                     Image(systemName: meeting.source == .legacyImported ? "doc.text" : "waveform")
                     Text(meeting.title).lineLimit(1)
                     Spacer()
+                    if meeting.source != .legacyImported, meeting.exportedNotePath != nil {
+                        Image(systemName: "doc.text").foregroundStyle(.secondary)
+                    }
                     if meeting.status == .draft { Image(systemName: "record.circle").foregroundStyle(.red) }
                 }.font(.callout.weight(.medium))
                 Text("\(formatDate(meeting.createdAt)) · \(PlaybackTimeFormatter.string(meeting.duration))")
@@ -253,20 +256,26 @@ struct TranscriptTimelineView<VM: TranscriptTimelineViewModel>: View {
             if vm.selectedMeetingAudioURL != nil {
                 MeetingPlaybackView(playback: vm.meetingPlayback, isDisabled: vm.isRecording || vm.isFinalizingSession)
             }
-            ForEach(vm.selectedMeetingSegments, id: \.id) { segment in
-                Button { vm.meetingPlayback.seek(to: segment.startTime) } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(PlaybackTimeFormatter.string(segment.startTime)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        Text(segment.speakerID.map { "\(vm.selectedMeetingSpeakerName($0)): \(segment.refinedText)" } ?? segment.refinedText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if let translation = vm.selectedMeetingTranslations[segment.id] {
-                            Text(translation).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(vm.selectedMeetingSegments, id: \.id) { segment in
+                    Button { vm.meetingPlayback.seek(to: segment.startTime) } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(PlaybackTimeFormatter.string(segment.startTime)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            Text(segment.speakerID.map { "\(vm.selectedMeetingSpeakerName($0)): \(segment.refinedText)" } ?? segment.refinedText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let translation = vm.selectedMeetingTranslations[segment.id] {
+                                Text(translation)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(vm.meetingPlayback.highlightedSegmentID == segment.id ? Color.accentColor.opacity(0.18) : Color.clear))
                     }
-                    .padding(8)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(vm.meetingPlayback.highlightedSegmentID == segment.id ? Color.accentColor.opacity(0.18) : Color.clear))
+                    .buttonStyle(.plain).disabled(vm.selectedMeetingAudioURL == nil)
                 }
-                .buttonStyle(.plain).disabled(vm.selectedMeetingAudioURL == nil)
             }
         }
     }

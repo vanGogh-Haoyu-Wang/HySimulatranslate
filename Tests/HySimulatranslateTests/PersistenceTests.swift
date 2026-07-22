@@ -41,6 +41,55 @@ final class PersistenceTests: XCTestCase {
         XCTAssertTrue(try transcripts.fetchRevisions(meetingID: records[0].id).isEmpty)
     }
 
+    func testExportedNotePathIsAttachedAndExcludedFromLegacyIndexing() throws {
+        let database = try AppDatabase.inMemory()
+        let meetings = MeetingRepository(database: database)
+        let meeting = try meetings.create(title: "Meeting", source: .live)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let note = directory.appendingPathComponent("Meeting.md")
+        try "# Meeting".write(to: note, atomically: true, encoding: .utf8)
+
+        try meetings.attachExportedNote(path: note.path, to: meeting.id)
+
+        XCTAssertEqual(try meetings.fetch(id: meeting.id)?.exportedNotePath, note.standardizedFileURL.path)
+        XCTAssertEqual(try meetings.indexLegacyNotes(in: directory), 0)
+        XCTAssertEqual(try meetings.fetchActive().map(\.id), [meeting.id])
+    }
+
+    func testReconcileLegacyExportsMergesOnlyUniqueMinuteMatchWithoutDeletingFile() throws {
+        let database = try AppDatabase.inMemory()
+        let meetings = MeetingRepository(database: database)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let uniqueNote = directory.appendingPathComponent("Default_Session_2026-07-16_11-09.md")
+        let ambiguousNote = directory.appendingPathComponent("Default_Session_2026-07-16_12-00.md")
+        try "unique".write(to: uniqueNote, atomically: true, encoding: .utf8)
+        try "ambiguous".write(to: ambiguousNote, atomically: true, encoding: .utf8)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm:ss"
+        let uniqueLive = MeetingRecord(title: "Default", source: .live, createdAt: formatter.date(from: "2026-07-16_11-09:30")!, updatedAt: Date())
+        let firstAmbiguous = MeetingRecord(title: "A", source: .live, createdAt: formatter.date(from: "2026-07-16_12-00:10")!, updatedAt: Date())
+        let secondAmbiguous = MeetingRecord(title: "B", source: .live, createdAt: formatter.date(from: "2026-07-16_12-00:40")!, updatedAt: Date())
+        let uniqueLegacy = MeetingRecord(title: uniqueNote.deletingPathExtension().lastPathComponent, source: .legacyImported, legacyNotePath: uniqueNote.path)
+        let ambiguousLegacy = MeetingRecord(title: ambiguousNote.deletingPathExtension().lastPathComponent, source: .legacyImported, legacyNotePath: ambiguousNote.path)
+        try database.writer.write { db in
+            try uniqueLive.insert(db); try firstAmbiguous.insert(db); try secondAmbiguous.insert(db)
+            try uniqueLegacy.insert(db); try ambiguousLegacy.insert(db)
+        }
+
+        XCTAssertEqual(try meetings.reconcileLegacyExports(), 1)
+        XCTAssertEqual(try meetings.fetch(id: uniqueLive.id)?.exportedNotePath, uniqueNote.standardizedFileURL.path)
+        XCTAssertNil(try meetings.fetch(id: uniqueLegacy.id))
+        XCTAssertNotNil(try meetings.fetch(id: ambiguousLegacy.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: uniqueNote.path))
+        _ = firstAmbiguous; _ = secondAmbiguous
+    }
+
     func testOnlySuccessfulTranscriptRevisionCanBecomeCurrent() throws {
         let database = try AppDatabase.inMemory()
         let meetings = MeetingRepository(database: database)

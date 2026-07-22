@@ -208,13 +208,12 @@ final class ModelCenterTests: XCTestCase {
     @MainActor func testCloudModelSelectionCoversAllProvidersAndNotifiesOwner() async throws {
         var persisted: [LLMProviderID: String] = [
             .groq: "groq-old",
-            .nvidia: "nvidia-old",
             .agnes: "agnes-old"
         ]
         var changes: [(LLMProviderID, String)] = []
         let vm = ModelCenterViewModel(
             resourceService: ModelResourceService(resources: []),
-            providerKeys: { [.groq: "gsk_test", .nvidia: "nvapi-test", .agnes: "sk-test"] },
+            providerKeys: { [.groq: "gsk_test", .agnes: "sk-test"] },
             selectedModels: { persisted },
             onModelSelectionChanged: { providerID, modelID in
                 persisted[providerID] = modelID
@@ -224,12 +223,12 @@ final class ModelCenterTests: XCTestCase {
         )
 
         await vm.refreshCloud()
-        for providerID in [LLMProviderID.groq, .nvidia, .agnes] {
+        for providerID in [LLMProviderID.groq, .agnes] {
             vm.selectModel("model-a", for: providerID)
             XCTAssertEqual(vm.selectedModelID(for: providerID), "model-a")
         }
-        XCTAssertEqual(changes.map(\.0), [.groq, .nvidia, .agnes])
-        XCTAssertEqual(persisted.values.filter { $0 == "model-a" }.count, 3)
+        XCTAssertEqual(changes.map(\.0), [.groq, .agnes])
+        XCTAssertEqual(persisted.values.filter { $0 == "model-a" }.count, 2)
     }
 
     @MainActor func testCloudRefreshUsesOneRequestAndFiltersRecommendedWithoutDroppingSelection() async throws {

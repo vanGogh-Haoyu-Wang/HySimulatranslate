@@ -1,12 +1,10 @@
 import Foundation
 
-// MARK: - 🌐 翻译引擎（多引擎回退）
-// 对应 Python robust_translate + translation_worker
+// MARK: - 🌐 翻译引擎（显式配置的 Groq + Apple 本地回退）
 
 actor TranslationService {
     typealias ResultHandler = @Sendable (UUID, String) -> Void
     nonisolated static let maxTranslationQueryCharacters = 450
-    nonisolated private static let freeTranslateTimeout: TimeInterval = 6
     nonisolated private static let llmTranslateTimeout: TimeInterval = 8
     private let appleTranslator: any AppleSystemTranslating
     private var onResult: ResultHandler?
@@ -27,9 +25,9 @@ actor TranslationService {
         let result: String
         switch mode {
         case .online:
-            let online = await robustTranslate(englishText, groqCredential: groqCredential)
+            let online = await robustTranslate(englishText, sourceLanguage: "en", targetLanguage: "zh", groqCredential: groqCredential)
             if Self.isCompleteTranslationFailure(online),
-               let apple = await appleTranslator.translate(englishText) {
+               let apple = await appleTranslator.translate(englishText, sourceLanguage: "en", targetLanguage: "zh") {
                 result = AppleTranslationTextNormalizer.simplifiedChinese(apple)
             } else {
                 result = online
@@ -53,11 +51,12 @@ actor TranslationService {
 
     // MARK: - 跳过无意义文本
 
-    private func shouldTranslate(_ text: String) -> Bool {
+    private func shouldTranslate(_ text: String, sourceLanguage: String = "en") -> Bool {
         let t = text.trimmingCharacters(in: .whitespaces)
         if t.isEmpty || t == "." { return false }
         if t.contains("捕获到口音") || t.contains("分析中") { return false }
-        let stripped = t.replacingOccurrences(of: "[^a-zA-Z]", with: "", options: .regularExpression)
+        let pattern = sourceLanguage.lowercased().hasPrefix("zh") ? "[^\\u{4E00}-\\u{9FFF}]" : "[^a-zA-Z]"
+        let stripped = t.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
         if stripped.isEmpty { return false }
         return true
     }
@@ -86,26 +85,28 @@ actor TranslationService {
 
     // MARK: - 判断翻译是否可用（不包含原文的英文字词残留）
 
-    private func isTranslationUsable(_ translated: String, original: String) -> Bool {
-        // 翻译结果如果基本上是英文 + % 乱码 → 不可用
-        let cleaned = translated
-            .replacingOccurrences(of: "%20", with: "")
-            .replacingOccurrences(of: "% 20", with: "")
-            .replacingOccurrences(of: "%", with: "")
-        let englishWords = original.lowercased().split(separator: " ").filter { $0.count > 2 }
-        let matchCount = englishWords.filter { cleaned.lowercased().contains(String($0)) }.count
-        // 超过 40% 原文单词出现在翻译结果中 → 翻译失败
-        return englishWords.isEmpty || matchCount <= max(1, englishWords.count / 2)
+    private func isTranslationUsable(_ translated: String, original: String, targetLanguage: String) -> Bool {
+        let output = translated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty, output != original.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+        let pattern = targetLanguage.lowercased().hasPrefix("zh") ? "[\\u{4E00}-\\u{9FFF}]" : "[A-Za-z]"
+        return output.range(of: pattern, options: .regularExpression) != nil
     }
 
     // MARK: - 多引擎回退
 
-    func robustTranslate(_ text: String, groqCredential: LLMProviderCredential?) async -> String {
+    func robustTranslate(
+        _ text: String,
+        sourceLanguage: String = "en",
+        targetLanguage: String = "zh",
+        groqCredential: LLMProviderCredential?
+    ) async -> String {
+        guard sourceLanguage.lowercased() != targetLanguage.lowercased() else { return text }
+        guard shouldTranslate(text, sourceLanguage: sourceLanguage) else { return "" }
         let units = Self.translationUnits(for: text)
         if units.count > 1 {
             var translatedUnits: [String] = []
             for unit in units {
-                translatedUnits.append(await translateSingleUnit(unit, groqCredential: groqCredential))
+                translatedUnits.append(await translateSingleUnit(unit, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, groqCredential: groqCredential))
             }
             let usable = translatedUnits.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             return usable.isEmpty ? "[翻译超时]" : usable.joined(separator: "\n")
@@ -115,12 +116,12 @@ actor TranslationService {
         if chunks.count > 1 {
             var translatedChunks: [String] = []
             for chunk in chunks {
-                translatedChunks.append(await translateSingleChunk(chunk, groqCredential: groqCredential))
+                translatedChunks.append(await translateSingleChunk(chunk, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, groqCredential: groqCredential))
             }
             let usable = translatedChunks.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             return usable.isEmpty ? "[翻译超时]" : usable.joined(separator: "\n")
         }
-        return await translateSingleChunk(chunks.first ?? text, groqCredential: groqCredential)
+        return await translateSingleChunk(chunks.first ?? text, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, groqCredential: groqCredential)
     }
 
     nonisolated static func translationUnits(for text: String) -> [String] {
@@ -129,49 +130,24 @@ actor TranslationService {
             .filter { !$0.isEmpty }
     }
 
-    private func translateSingleUnit(_ text: String, groqCredential: LLMProviderCredential?) async -> String {
+    private func translateSingleUnit(_ text: String, sourceLanguage: String, targetLanguage: String, groqCredential: LLMProviderCredential?) async -> String {
         let chunks = Self.chunkTextForTranslation(text)
         if chunks.count > 1 {
             var translatedChunks: [String] = []
             for chunk in chunks {
-                translatedChunks.append(await translateSingleChunk(chunk, groqCredential: groqCredential))
+                translatedChunks.append(await translateSingleChunk(chunk, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, groqCredential: groqCredential))
             }
             let usable = translatedChunks.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             return usable.isEmpty ? "[翻译超时]" : usable.joined(separator: " ")
         }
-        return await translateSingleChunk(chunks.first ?? text, groqCredential: groqCredential)
+        return await translateSingleChunk(chunks.first ?? text, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, groqCredential: groqCredential)
     }
 
-    private func translateSingleChunk(_ text: String, groqCredential: LLMProviderCredential?) async -> String {
-        // 1️⃣ Google no-key endpoint: fastest and currently most reliable free fallback.
-        if let r = await retryTranslation(attempts: 2, delayNanoseconds: 500_000_000, operation: {
-            await self.googleTranslate(text)
-        }),
-           r != text, isTranslationUsable(r, original: text) { return r }
-
-        // 2️⃣ Groq: higher-quality fallback when configured and self-check passed.
+    private func translateSingleChunk(_ text: String, sourceLanguage: String, targetLanguage: String, groqCredential: LLMProviderCredential?) async -> String {
         if let groqCredential,
-           let r = await llmTranslate(text, credential: groqCredential),
-           r != text, isTranslationUsable(r, original: text) { return r }
-
-        // 3️⃣ MyMemory: useful as a last resort, but often rate-limited on the free tier.
-        if let r = await myMemoryTranslate(text),
-           r != text, isTranslationUsable(r, original: text) { return r }
+           let r = await llmTranslate(text, sourceLanguage: sourceLanguage, targetLanguage: targetLanguage, credential: groqCredential),
+           isTranslationUsable(r, original: text, targetLanguage: targetLanguage) { return r }
         return "[翻译超时]"
-    }
-
-    private func retryTranslation(
-        attempts: Int,
-        delayNanoseconds: UInt64,
-        operation: () async -> String?
-    ) async -> String? {
-        for attempt in 0..<attempts {
-            if let result = await operation() { return result }
-            if attempt < attempts - 1 {
-                try? await Task.sleep(nanoseconds: delayNanoseconds)
-            }
-        }
-        return nil
     }
 
     nonisolated static func chunkTextForTranslation(
@@ -231,95 +207,9 @@ actor TranslationService {
         return chunks
     }
 
-    // MARK: - MyMemory
-
-    private func myMemoryTranslate(_ text: String) async -> String? {
-        guard let url = Self.myMemoryTranslateURL(for: text) else { return nil }
-
-        var req = URLRequest(url: url, timeoutInterval: Self.freeTranslateTimeout)
-        req.httpMethod = "GET"
-        req.addValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rd = json["responseData"] as? [String: Any],
-              let translated = rd["translatedText"] as? String
-        else { return nil }
-
-        return translated.trimmingCharacters(in: .whitespaces)
-    }
-
-    nonisolated static func myMemoryTranslateURL(for text: String) -> URL? {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "api.mymemory.translated.net"
-        components.path = "/get"
-        components.percentEncodedQuery = encodedQuery([
-            ("q", text),
-            ("langpair", "en|zh")
-        ])
-        return components.url
-    }
-
-    // MARK: - Google Translate
-
-    private func googleTranslate(_ text: String) async -> String? {
-        guard let url = Self.googleTranslateURL(for: text) else { return nil }
-
-        var req = URLRequest(url: url, timeoutInterval: Self.freeTranslateTimeout)
-        req.httpMethod = "GET"
-        req.addValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [Any]
-        else { return nil }
-
-        // Google 响应: [[["译文","原文",...], null, ...], null, ...]
-        guard let outerArray = json.first as? [Any] else { return nil }
-
-        var result = ""
-        for element in outerArray {
-            guard let segment = element as? [Any],
-                  let translated = segment.first as? String
-            else { continue }
-            result += translated
-        }
-
-        let trimmed = result.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    nonisolated static func googleTranslateURL(for text: String) -> URL? {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "translate.googleapis.com"
-        components.path = "/translate_a/single"
-        components.percentEncodedQuery = encodedQuery([
-            ("client", "gtx"),
-            ("sl", "en"),
-            ("tl", "zh"),
-            ("dt", "t"),
-            ("q", text)
-        ])
-        return components.url
-    }
-
-    nonisolated private static func encodedQuery(_ items: [(String, String)]) -> String {
-        items.map { "\($0.0)=\(percentEncodeQueryValue($0.1))" }
-            .joined(separator: "&")
-    }
-
-    nonisolated private static func percentEncodeQueryValue(_ value: String) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
-    }
-
     // MARK: - LLM 翻译
 
-    private func llmTranslate(_ text: String, credential: LLMProviderCredential) async -> String? {
+    private func llmTranslate(_ text: String, sourceLanguage: String, targetLanguage: String, credential: LLMProviderCredential) async -> String? {
         await ChatRateLimiter.shared.waitTurn(for: credential)
         var req = URLRequest(url: credential.provider.chatCompletionsURL)
         req.httpMethod = "POST"
@@ -331,7 +221,7 @@ actor TranslationService {
             "model": credential.provider.modelName,
             "messages": [
                 ["role": "system", "content":
-                    "You are a translator. Translate the English text to Simplified Chinese. Output ONLY the Chinese, nothing else. Do NOT repeat the English."],
+                    "You are a translator. Translate from \(sourceLanguage) to \(targetLanguage). Output ONLY the translation, nothing else. Do not repeat the source."],
                 ["role": "user", "content": text]
             ],
             "temperature": 0.0,

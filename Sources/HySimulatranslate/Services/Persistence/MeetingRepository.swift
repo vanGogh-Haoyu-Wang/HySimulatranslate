@@ -56,13 +56,73 @@ final class MeetingRepository {
             return record
         }
         return try database.writer.write { db in
+            let knownPaths = Set(try Row.fetchAll(db, sql: "SELECT legacyNotePath, exportedNotePath FROM meetings").flatMap { row in
+                [row["legacyNotePath"] as String?, row["exportedNotePath"] as String?].compactMap { $0 }
+            })
             var inserted = 0
-            for record in candidates {
+            for record in candidates where !knownPaths.contains(record.legacyNotePath ?? "") {
                 try record.insert(db, onConflict: .ignore)
                 inserted += db.changesCount
             }
             return inserted
         }
+    }
+
+    func attachExportedNote(path: String, to meetingID: UUID) throws {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        try database.writer.write { db in
+            guard try MeetingRecord.fetchOne(db, key: meetingID) != nil else { throw PersistenceRepositoryError.missingRecord }
+            try MeetingRecord
+                .filter(Column("legacyNotePath") == normalized && Column("source") == MeetingSource.legacyImported)
+                .deleteAll(db)
+            try db.execute(
+                sql: "UPDATE meetings SET exportedNotePath = ?, updatedAt = ? WHERE id = ?",
+                arguments: [normalized, Date(), meetingID]
+            )
+        }
+    }
+
+    @discardableResult func reconcileLegacyExports() throws -> Int {
+        try database.writer.write { db in
+            let legacy = try MeetingRecord
+                .filter(Column("source") == MeetingSource.legacyImported && Column("legacyNotePath") != nil)
+                .fetchAll(db)
+            var merged = 0
+            for note in legacy {
+                guard let path = note.legacyNotePath else { continue }
+                if try MeetingRecord.filter(Column("exportedNotePath") == path).fetchCount(db) == 1 {
+                    _ = try note.delete(db); merged += 1; continue
+                }
+                guard let minute = Self.exportMinute(from: path) else { continue }
+                let candidates = try MeetingRecord
+                    .filter(
+                        Column("source") == MeetingSource.live
+                            && Column("exportedNotePath") == nil
+                            && Column("createdAt") >= minute
+                            && Column("createdAt") < minute.addingTimeInterval(60)
+                    )
+                    .fetchAll(db)
+                guard candidates.count == 1 else { continue }
+                try db.execute(
+                    sql: "UPDATE meetings SET exportedNotePath = ?, updatedAt = ? WHERE id = ?",
+                    arguments: [URL(fileURLWithPath: path).standardizedFileURL.path, Date(), candidates[0].id]
+                )
+                _ = try note.delete(db)
+                merged += 1
+            }
+            return merged
+        }
+    }
+
+    private static func exportMinute(from path: String) -> Date? {
+        let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        guard let marker = name.range(of: "_Session_", options: .backwards) else { return nil }
+        let value = String(name[marker.upperBound...])
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm"
+        return formatter.date(from: value)
     }
 
     func saveAudioAsset(_ asset: AudioAssetRecord) throws { try database.writer.write { try asset.save($0) } }
@@ -75,6 +135,16 @@ final class MeetingRepository {
             try db.execute(
                 sql: "UPDATE meetings SET duration = ?, status = ?, updatedAt = ? WHERE id = ?",
                 arguments: [duration, status, Date(), id]
+            )
+        }
+    }
+
+    func finishSession(id: UUID, duration: Double, assets: [AudioAssetRecord]) throws {
+        try database.writer.write { db in
+            for asset in assets { try asset.save(db) }
+            try db.execute(
+                sql: "UPDATE meetings SET duration = ?, status = ?, updatedAt = ? WHERE id = ?",
+                arguments: [duration, PersistenceStatus.ready, Date(), id]
             )
         }
     }

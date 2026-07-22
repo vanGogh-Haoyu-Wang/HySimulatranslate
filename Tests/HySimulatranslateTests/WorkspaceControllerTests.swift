@@ -37,8 +37,10 @@ struct WorkspaceControllerTests {
         let db = try AppDatabase.inMemory()
         let resources = ModelResourceService(resources: [])
         let coordinator = SessionCoordinator(database: db, modelUsage: ModelUsageCoordinator(resources: resources), sessionsRoot: FileManager.default.temporaryDirectory)
-        let context = try await coordinator.begin(title: "Live", subjectID: nil, enabledSources: [.microphone])
+        let noteURL = URL(fileURLWithPath: "/tmp/Live.md")
+        let context = try await coordinator.begin(title: "Live", subjectID: nil, enabledSources: [.microphone], noteURL: noteURL)
         #expect(context.generation > 0)
+        #expect(try MeetingRepository(database: db).fetch(id: context.persistence.meetingID)?.exportedNotePath == noteURL.standardizedFileURL.path)
         try await coordinator.abort(context)
         #expect(try MeetingRepository(database: db).fetch(id: context.persistence.meetingID)?.status == .cancelled)
     }
@@ -64,6 +66,6 @@ struct WorkspaceControllerTests {
 }
 
 private struct WorkspaceAppleTranslator: AppleSystemTranslating {
-    func prepare() async -> Bool { false }
-    func translate(_ text: String) async -> String? { nil }
+    func prepare(sourceLanguage: String, targetLanguage: String) async -> Bool { false }
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async -> String? { nil }
 }

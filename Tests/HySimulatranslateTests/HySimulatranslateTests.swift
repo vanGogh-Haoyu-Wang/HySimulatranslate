@@ -11,11 +11,11 @@ private actor StubAppleSystemTranslator: AppleSystemTranslating {
         self.translationResult = translationResult
     }
 
-    func prepare() async -> Bool {
+    func prepare(sourceLanguage: String, targetLanguage: String) async -> Bool {
         prepareResult
     }
 
-    func translate(_ text: String) async -> String? {
+    func translate(_ text: String, sourceLanguage: String, targetLanguage: String) async -> String? {
         translatedTexts.append(text)
         return translationResult
     }
@@ -75,14 +75,11 @@ final class HySimulatranslateTests: XCTestCase {
         let sherpaRelativePath = AppResourceLocator.sherpaModelRelativePath
         let bundledSherpaModel = payload.appendingPathComponent(sherpaRelativePath)
         let installedSherpaModel = support.appendingPathComponent(sherpaRelativePath)
-        let bundledScripts = payload.appendingPathComponent("Scripts")
 
         try FileManager.default.createDirectory(at: bundledSherpaModel, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: installedSherpaModel, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: bundledScripts, withIntermediateDirectories: true)
         try Data("bundled tokens".utf8).write(to: bundledSherpaModel.appendingPathComponent("tokens.txt"))
         try Data("user tokens".utf8).write(to: installedSherpaModel.appendingPathComponent("tokens.txt"))
-        try Data("#!/usr/bin/env bash\n".utf8).write(to: bundledScripts.appendingPathComponent("package_dmg.sh"))
 
         try AppResourceLocator.installBundledResourcesIfNeeded(
             supportDirectory: support,
@@ -91,14 +88,6 @@ final class HySimulatranslateTests: XCTestCase {
 
         let preservedTokens = try String(contentsOf: installedSherpaModel.appendingPathComponent("tokens.txt"))
         XCTAssertEqual(preservedTokens, "user tokens")
-        XCTAssertTrue(
-            FileManager.default.fileExists(
-                atPath: support
-                    .appendingPathComponent("Scripts")
-                    .appendingPathComponent("package_dmg.sh")
-                    .path
-            )
-        )
     }
 
     func testAppResourceLocatorPrefersInstalledModelsThenBundledPayload() throws {
@@ -565,31 +554,6 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDirectory.path))
     }
 
-    func testWhisperRefinementModeMigratesEveryLegacyValueToSmartHybrid() {
-        for legacy in ["localFirst", "cloudFirst", "localOnly", "unknown"] {
-            XCTAssertEqual(WhisperRefinementMode.fromStorageValue(legacy), .smartHybrid)
-        }
-        XCTAssertEqual(WhisperRefinementMode.smartHybrid.title, "智能混合")
-    }
-
-    @MainActor
-    func testViewModelPersistsLegacyWhisperModeAsSmartHybrid() {
-        let defaults = UserDefaults.standard
-        let previous = defaults.string(forKey: "whisperRefinementMode")
-        defer {
-            if let previous {
-                defaults.set(previous, forKey: "whisperRefinementMode")
-            } else {
-                defaults.removeObject(forKey: "whisperRefinementMode")
-            }
-        }
-        defaults.set("localOnly", forKey: "whisperRefinementMode")
-
-        let vm = TranscriptionViewModel()
-
-        XCTAssertEqual(vm.whisperRefinementModeRaw, WhisperRefinementMode.smartHybrid.rawValue)
-    }
-
     func testSherpaNoTextCutKeepsShortAccentAnalysisWindow() {
         XCTAssertFalse(SherpaService.shouldCutNoTextSegment(text: "", audioSec: 1.9))
         XCTAssertTrue(SherpaService.shouldCutNoTextSegment(text: "", audioSec: 2.0))
@@ -817,40 +781,23 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(chunks.joined(separator: " ").contains("People's potential is unlimited"))
     }
 
-    func testTranslationURLsPercentEncodeQuerySeparators() throws {
-        let text = "NVIDIA & OpenAI + Azure #1?"
-
-        let googleURL = try XCTUnwrap(TranslationService.googleTranslateURL(for: text))
-        let myMemoryURL = try XCTUnwrap(TranslationService.myMemoryTranslateURL(for: text))
-
-        XCTAssertEqual(
-            URLComponents(url: googleURL, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "q" })?.value,
-            text
-        )
-        XCTAssertEqual(
-            URLComponents(url: myMemoryURL, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "q" })?.value,
-            text
-        )
-        XCTAssertTrue(googleURL.absoluteString.contains("%26"))
-        XCTAssertTrue(googleURL.absoluteString.contains("%2B"))
-        XCTAssertTrue(googleURL.absoluteString.contains("%231"))
+    func testTranslationLanguagePairNormalizesChineseLocale() {
+        XCTAssertEqual(TranslationLanguagePair(source: "zh", target: "en"), .init(source: "zh-Hans", target: "en"))
     }
 
-    func testLLMProviderCatalogSeparatesGroqCoreAndNvidiaSummaryModelsWithGetLinks() throws {
+    func testLLMProviderCatalogSeparatesGroqCoreAndFreeLLMSummary() throws {
         let groq = try XCTUnwrap(LLMProviderCatalog.groqCoreProvider)
-        let nvidia = try XCTUnwrap(LLMProviderCatalog.nvidiaSummaryProvider)
+        let freeLLM = try XCTUnwrap(LLMProviderCatalog.freeLLMSummaryProvider())
         let agnes = try XCTUnwrap(LLMProviderCatalog.agnesOrganizerProvider)
 
         XCTAssertEqual(groq.displayName, "Groq")
         XCTAssertEqual(groq.modelName, "llama-3.3-70b-versatile")
         XCTAssertEqual(groq.getAPIKeyURL.absoluteString, "https://console.groq.com/keys")
 
-        XCTAssertEqual(nvidia.displayName, "NVIDIA 总结")
-        XCTAssertEqual(nvidia.modelName, "nvidia/llama-3.3-nemotron-super-49b-v1")
-        XCTAssertEqual(nvidia.getAPIKeyURL.absoluteString, "https://build.nvidia.com")
-        XCTAssertGreaterThanOrEqual(nvidia.timeout, 20)
+        XCTAssertEqual(freeLLM.displayName, "FreeLLMAPI")
+        XCTAssertEqual(freeLLM.modelName, "auto")
+        XCTAssertEqual(freeLLM.chatCompletionsURL.absoluteString, "http://100.76.88.120:3001/v1/chat/completions")
+        XCTAssertGreaterThanOrEqual(freeLLM.timeout, 20)
 
         XCTAssertEqual(agnes.displayName, "Agnes 整理")
         XCTAssertEqual(agnes.modelName, "agnes-2.0-flash")
@@ -875,26 +822,26 @@ final class HySimulatranslateTests: XCTestCase {
         )
     }
 
-    func testLLMProviderCredentialsKeepGroqCoreSeparateFromNvidiaSummary() {
+    func testLLMProviderCredentialsKeepGroqCoreSeparateFromFreeLLMSummary() {
         let keys: [LLMProviderID: String] = [
             .groq: "gsk_test_key",
-            .nvidia: "nvapi-test-key",
+            .freeLLM: "router-test-key",
             .agnes: "sk-test-key"
         ]
 
         let coreCredential = LLMProviderCatalog.groqCoreCredential(from: keys)
-        let summaryCredential = LLMProviderCatalog.nvidiaSummaryCredential(from: keys)
+        let summaryCredential = LLMProviderCatalog.freeLLMSummaryCredential(from: keys)
         let organizerCredential = LLMProviderCatalog.agnesOrganizerCredential(from: keys)
 
         XCTAssertEqual(coreCredential?.provider.id, .groq)
-        XCTAssertEqual(summaryCredential?.provider.id, .nvidia)
+        XCTAssertEqual(summaryCredential?.provider.id, .freeLLM)
         XCTAssertEqual(organizerCredential?.provider.id, .agnes)
     }
 
     func testKeychainProviderKeysPayloadKeepsOnlyNonEmptyKnownProviders() {
         let payload = KeychainManager.providerKeysPayload([
             .groq: "  gsk_test  ",
-            .nvidia: "",
+            .freeLLM: "",
             .agnes: "sk_test"
         ])
 
@@ -907,13 +854,13 @@ final class HySimulatranslateTests: XCTestCase {
     func testKeychainProviderKeysAggregateJSONRoundTrips() {
         let encoded = KeychainManager.encodeProviderKeys([
             .groq: "gsk_test",
-            .nvidia: " nvapi_test ",
+            .freeLLM: " router_test ",
             .agnes: "sk_test"
         ])
 
         XCTAssertEqual(KeychainManager.decodeProviderKeys(encoded), [
             .groq: "gsk_test",
-            .nvidia: "nvapi_test",
+            .freeLLM: "router_test",
             .agnes: "sk_test"
         ])
         XCTAssertNil(KeychainManager.decodeProviderKeys("not json"))
@@ -936,7 +883,7 @@ final class HySimulatranslateTests: XCTestCase {
     func testKeychainProviderKeysCanMigrateLegacyAccountsWhenExplicitlyRequested() {
         let legacyValues = [
             "groq_api_key": "gsk_legacy",
-            "nvidia_api_key": " nvapi_legacy ",
+            "freellm_api_key": " router_legacy ",
             "agnes_api_key": "sk_legacy"
         ]
         let migrated = KeychainManager.migrateLegacyProviderKeys { account in
@@ -945,20 +892,20 @@ final class HySimulatranslateTests: XCTestCase {
 
         XCTAssertEqual(migrated, [
             .groq: "gsk_legacy",
-            .nvidia: "nvapi_legacy",
+            .freeLLM: "router_legacy",
             .agnes: "sk_legacy"
         ])
     }
 
     func testLLMProviderModelListsContainOnlyFreeDefaults() {
         let groqModels = LLMProviderCatalog.models(for: .groq)
-        let nvidiaModels = LLMProviderCatalog.models(for: .nvidia)
+        let freeLLMModels = LLMProviderCatalog.models(for: .freeLLM)
         let agnesModels = LLMProviderCatalog.models(for: .agnes)
 
         XCTAssertEqual(groqModels.first?.id, LLMProviderCatalog.defaultGroqModelName)
         XCTAssertEqual(groqModels.first?.freeStatus, .free)
-        XCTAssertEqual(nvidiaModels.first?.id, LLMProviderCatalog.defaultNvidiaSummaryModelName)
-        XCTAssertEqual(nvidiaModels.first?.freeStatus, .free)
+        XCTAssertEqual(freeLLMModels.first?.id, LLMProviderCatalog.defaultFreeLLMSummaryModelName)
+        XCTAssertEqual(freeLLMModels.first?.freeStatus, .unknown)
         XCTAssertEqual(agnesModels, [
             LLMProviderModel(
                 providerID: .agnes,
@@ -967,9 +914,7 @@ final class HySimulatranslateTests: XCTestCase {
                 recommendationScore: 100
             )
         ])
-        XCTAssertFalse(nvidiaModels.contains { $0.id == "nvidia/llama-3.3-nemotron-super-49b-v1.5" })
         XCTAssertTrue(groqModels.allSatisfy { $0.freeStatus == .free })
-        XCTAssertTrue(nvidiaModels.allSatisfy { $0.freeStatus == .free })
     }
 
     func testModelDiscoveryParsesOpenAICompatibleModelIDs() throws {
@@ -1155,11 +1100,10 @@ final class HySimulatranslateTests: XCTestCase {
     func testSelectedProviderModelsOverrideCredentialModelNames() {
         let keys: [LLMProviderID: String] = [
             .groq: "gsk_test_key",
-            .nvidia: "nvapi-test-key"
+            .freeLLM: "router-test-key"
         ]
         let selected: [LLMProviderID: String] = [
-            .groq: "llama-3.1-8b-instant",
-            .nvidia: "nvidia/llama-3.1-nemotron-70b-instruct"
+            .groq: "llama-3.1-8b-instant"
         ]
 
         XCTAssertEqual(
@@ -1170,18 +1114,15 @@ final class HySimulatranslateTests: XCTestCase {
             "llama-3.1-8b-instant"
         )
         XCTAssertEqual(
-            LLMProviderCatalog.nvidiaSummaryCredential(
-                from: keys,
-                selectedModelNames: selected
-            )?.provider.modelName,
-            "nvidia/llama-3.1-nemotron-70b-instruct"
+            LLMProviderCatalog.freeLLMSummaryCredential(from: keys)?.provider.modelName,
+            "auto"
         )
     }
 
     @MainActor
     func testChangingProviderModelInvalidatesPreviousConnectivityState() {
         let vm = TranscriptionViewModel()
-        vm.providerAPIKeys = [.groq: "gsk_test_key", .nvidia: "nvapi-test-key"]
+        vm.providerAPIKeys = [.groq: "gsk_test_key", .freeLLM: "router-test-key"]
         vm.engineStatus = .ready("ready")
         vm.sherpaReady = true
         vm.whisperReady = true
@@ -1224,7 +1165,7 @@ final class HySimulatranslateTests: XCTestCase {
 
         XCTAssertNil(cursor.pendingRange(totalCount: 8))
         XCTAssertNil(cursor.pendingRange(totalCount: 15))
-        XCTAssertEqual(cursor.pendingRange(totalCount: 16), 0..<16)
+        XCTAssertEqual(cursor.pendingRange(totalCount: 16), 8..<16)
     }
 
     func testTranslationUnitsPreserveLLMLineBreaks() {
@@ -1673,11 +1614,11 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Alice asked whether the budget can move."))
     }
 
-    func testNvidiaSummaryServiceRejectsFailureSummaryText() {
-        XCTAssertNil(NvidiaSummaryService.normalizedSummaryContent("总结失败"))
-        XCTAssertNil(NvidiaSummaryService.normalizedSummaryContent("无法根据提供内容生成总结。"))
+    func testFreeLLMSummaryServiceRejectsFailureSummaryText() {
+        XCTAssertNil(FreeLLMSummaryService.normalizedSummaryContent("总结失败"))
+        XCTAssertNil(FreeLLMSummaryService.normalizedSummaryContent("无法根据提供内容生成总结。"))
         XCTAssertEqual(
-            NvidiaSummaryService.normalizedSummaryContent("A 提出预算问题，B 回答期限优先。"),
+            FreeLLMSummaryService.normalizedSummaryContent("A 提出预算问题，B 回答期限优先。"),
             "A 提出预算问题，B 回答期限优先。"
         )
     }
@@ -2138,7 +2079,7 @@ final class HySimulatranslateTests: XCTestCase {
                     status: .passed
                 ),
                 LLMProviderCheckResult(
-                    provider: LLMProviderCatalog.nvidiaSummaryProvider!,
+                    provider: LLMProviderCatalog.freeLLMSummaryProvider()!,
                     status: .notConfigured
                 )
             ]
@@ -2151,7 +2092,7 @@ final class HySimulatranslateTests: XCTestCase {
             "[自检] Sherpa: 通过",
             "[自检] WhisperKit 本地灾备: 通过",
             "[自检] Groq / llama-3.3-70b-versatile: 通过",
-            "[自检] NVIDIA 总结 / nvidia/llama-3.3-nemotron-super-49b-v1: 未配置"
+            "[自检] FreeLLMAPI / auto: 未配置"
         ])
     }
 
@@ -2406,7 +2347,7 @@ final class HySimulatranslateTests: XCTestCase {
     func testProviderCheckStripHidesAfterTranscriptionStartsOrHistoryArrives() {
         let results = [
             LLMProviderCheckResult(provider: LLMProviderCatalog.groqCoreProvider!, status: .passed),
-            LLMProviderCheckResult(provider: LLMProviderCatalog.nvidiaSummaryProvider!, status: .passed)
+            LLMProviderCheckResult(provider: LLMProviderCatalog.freeLLMSummaryProvider()!, status: .passed)
         ]
         let systemHistory = [
             TranscriptionItem(english: "[自检] Sherpa: 通过", status: .done, zone: .history, isSystemMessage: true)
@@ -2457,18 +2398,18 @@ final class HySimulatranslateTests: XCTestCase {
         let vm = TranscriptionViewModel()
         vm.updateProviderAPIKeys([
             .groq: "gsk_test_key",
-            .nvidia: "nvapi-test-key",
+            .freeLLM: "router-test-key",
             .agnes: "sk-test-key"
         ])
 
         XCTAssertEqual(vm.providerAPIKeys[.groq], "gsk_test_key")
-        XCTAssertEqual(vm.providerAPIKeys[.nvidia], "nvapi-test-key")
+        XCTAssertEqual(vm.providerAPIKeys[.freeLLM], "router-test-key")
         XCTAssertEqual(vm.providerAPIKeys[.agnes], "sk-test-key")
         XCTAssertEqual(vm.providerCheckResults.count, 3)
     }
 
     @MainActor
-    func testStopTranscriptionKeepsRestartDisabledUntilFinalNotesFinish() async {
+    func testStopTranscriptionKeepsRestartDisabledUntilFinalNoteAttemptFinishes() async {
         let vm = TranscriptionViewModel()
         vm.currentCourse = CourseSubject(
             name: "默认",
@@ -2499,7 +2440,7 @@ final class HySimulatranslateTests: XCTestCase {
 
         XCTAssertFalse(vm.isFinalizingSession)
         XCTAssertTrue(vm.canRestart)
-        XCTAssertEqual(vm.liveSummaryStatus, "已写入笔记")
+        XCTAssertEqual(vm.liveSummaryStatus, "笔记写入失败，可重试")
     }
 
     func testVADResourcePrefersApplicationSupportFile() throws {

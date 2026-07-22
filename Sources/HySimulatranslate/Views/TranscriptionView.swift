@@ -700,7 +700,24 @@ struct TranscriptionView: View {
 
     @ViewBuilder
     private var rightContentPanel: some View {
-        if vm.selectedNoteRecord != nil {
+        if let meeting = vm.selectedMeeting,
+           meeting.source != .legacyImported,
+           vm.selectedNoteRecord != nil {
+            VStack(spacing: 8) {
+                Picker("右侧内容", selection: $vm.meetingRightPanelMode) {
+                    ForEach(MeetingRightPanelMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                if vm.meetingRightPanelMode == .note {
+                    notePreviewOverlayPanel
+                } else {
+                    summaryEnvironmentPanel
+                }
+            }
+        } else if vm.selectedNoteRecord != nil {
             notePreviewOverlayPanel
         } else {
             summaryEnvironmentPanel
@@ -763,7 +780,7 @@ struct TranscriptionView: View {
                     liveSummary: vm.liveSummaryText,
                     liveStatus: vm.liveSummaryStatus,
                     isUpdating: vm.isLiveSummaryUpdating,
-                    modelName: vm.nvidiaSummaryModelName
+                    modelName: LLMProviderCatalog.defaultFreeLLMSummaryModelName
                 )
             } else {
                 legacySummaryEnvironmentPanel
@@ -777,7 +794,7 @@ struct TranscriptionView: View {
                 Text("笔记总结区")
                     .font(centerWallFont(weight: .semibold))
                     .foregroundStyle(.secondary)
-                providerModelBadge(prefix: "NVIDIA", modelName: vm.nvidiaSummaryModelName)
+                providerModelBadge(prefix: "FreeLLMAPI", modelName: LLMProviderCatalog.defaultFreeLLMSummaryModelName)
                 Spacer()
                 if vm.isLiveSummaryUpdating {
                     ProgressView()
@@ -824,6 +841,12 @@ struct TranscriptionView: View {
                     .font(centerWallFont())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if vm.selectedMeeting?.source != .legacyImported,
+                   vm.notePreviewText.isEmpty,
+                   vm.selectedMeeting?.exportedNotePath != nil {
+                    Button("重新导出") { Task { await vm.reexportSelectedMeetingNote() } }
+                        .font(centerWallFont(weight: .medium))
+                }
             }
 
             Divider()
@@ -1063,11 +1086,25 @@ struct TranscriptionView: View {
             if let groq = LLMProviderCatalog.groqCoreProvider {
                 providerKeyRow(groq, title: "Groq 核心")
             }
-            if let nvidia = LLMProviderCatalog.nvidiaSummaryProvider {
-                providerKeyRow(nvidia, title: "NVIDIA 总结")
+            if let freeLLM = LLMProviderCatalog.freeLLMSummaryProvider(baseURL: vm.freeLLMBaseURL) {
+                providerKeyRow(freeLLM, title: "FreeLLMAPI 总结")
+            }
+            TextField("FreeLLMAPI Base URL", text: $vm.freeLLMBaseURL)
+                .font(centerWallFont())
+                .textFieldStyle(.roundedBorder)
+            if LLMProviderCatalog.freeLLMSummaryProvider(baseURL: vm.freeLLMBaseURL) == nil {
+                Text("请输入以 http:// 或 https:// 开头的有效地址")
+                    .font(centerWallFont())
+                    .foregroundStyle(.red)
             }
             if let agnes = LLMProviderCatalog.agnesOrganizerProvider {
                 providerKeyRow(agnes, title: "Agnes 整理", showsStatus: true)
+            }
+            GroupBox("数据处理说明") {
+                Text("音频转写和说话人识别默认在本机完成。启用云功能后，Groq 接收待翻译文本，FreeLLMAPI 接收总结文本，Agnes 仅在启用整理时接收文本。")
+                    .font(centerWallFont())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -1144,6 +1181,13 @@ struct TranscriptionView: View {
             }
             .disabled(vm.isRecording || vm.isFinalizingSession)
 
+            if let error = vm.noteWriteError {
+                HStack {
+                    Text(error).font(centerWallFont()).foregroundStyle(.red).lineLimit(2)
+                    Button("重试写入") { vm.retryNoteWrite() }
+                }
+            }
+
             Picker("笔记格式", selection: $vm.noteFileFormatRaw) {
                 ForEach(NoteFileFormat.allCases) { format in
                     Text(format.title).tag(format.rawValue)
@@ -1175,7 +1219,7 @@ struct TranscriptionView: View {
             Label("Whisper 精校", systemImage: "waveform.and.magnifyingglass")
                 .font(centerWallFont(weight: .semibold))
             Spacer()
-            Label(WhisperRefinementMode.smartHybrid.title, systemImage: "cloud")
+            Label("智能混合", systemImage: "cloud")
                 .font(centerWallFont())
                 .foregroundStyle(.secondary)
         }

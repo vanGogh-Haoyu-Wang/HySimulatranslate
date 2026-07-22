@@ -2,7 +2,7 @@ import Foundation
 
 enum LLMProviderID: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
     case groq
-    case nvidia
+    case freeLLM
     case agnes
 
     var id: String { rawValue }
@@ -119,8 +119,10 @@ struct LLMProviderCheckResult: Equatable, Sendable {
 
 enum LLMProviderCatalog {
     static let defaultGroqModelName = "llama-3.3-70b-versatile"
-    static let defaultNvidiaSummaryModelName = "nvidia/llama-3.3-nemotron-super-49b-v1"
+    static let defaultFreeLLMSummaryModelName = "auto"
+    static let defaultFreeLLMBaseURL = "http://100.76.88.120:3001"
     static let defaultAgnesOrganizerModelName = "agnes-2.0-flash"
+    static let modelCenterProviderIDs: [LLMProviderID] = [.groq, .agnes]
 
     static let allProviders: [LLMProvider] = [
         LLMProvider(
@@ -136,15 +138,15 @@ enum LLMProviderCatalog {
             timeout: 4.0
         ),
         LLMProvider(
-            id: .nvidia,
-            displayName: "NVIDIA 总结",
-            modelName: defaultNvidiaSummaryModelName,
-            chatCompletionsURL: URL(string: "https://integrate.api.nvidia.com/v1/chat/completions")!,
-            modelsURL: URL(string: "https://integrate.api.nvidia.com/v1/models")!,
-            getAPIKeyURL: URL(string: "https://build.nvidia.com")!,
-            keychainAccount: "nvidia_api_key",
-            keyPlaceholder: "nvapi-...",
-            requiredKeyPrefix: "nvapi-",
+            id: .freeLLM,
+            displayName: "FreeLLMAPI",
+            modelName: defaultFreeLLMSummaryModelName,
+            chatCompletionsURL: URL(string: "\(defaultFreeLLMBaseURL)/v1/chat/completions")!,
+            modelsURL: URL(string: "\(defaultFreeLLMBaseURL)/v1/models")!,
+            getAPIKeyURL: URL(string: "\(defaultFreeLLMBaseURL)/models/chat")!,
+            keychainAccount: "freellm_api_key",
+            keyPlaceholder: "FreeLLMAPI Key",
+            requiredKeyPrefix: nil,
             timeout: 25.0
         ),
         LLMProvider(
@@ -165,9 +167,9 @@ enum LLMProviderCatalog {
         LLMProviderModel(providerID: .groq, id: $0.key, freeStatus: .free, recommendationScore: $0.value)
     })
 
-    static let nvidiaSummaryModels: [LLMProviderModel] = sortedModels(nvidiaKnownFreeSummaryModels.map {
-        LLMProviderModel(providerID: .nvidia, id: $0.key, freeStatus: .free, recommendationScore: $0.value)
-    })
+    static let freeLLMSummaryModels: [LLMProviderModel] = [
+        LLMProviderModel(providerID: .freeLLM, id: defaultFreeLLMSummaryModelName, freeStatus: .unknown, recommendationScore: 100)
+    ]
 
     static let agnesOrganizerModels: [LLMProviderModel] = [
         LLMProviderModel(
@@ -182,8 +184,8 @@ enum LLMProviderCatalog {
         switch id {
         case .groq:
             return groqCoreModels
-        case .nvidia:
-            return nvidiaSummaryModels
+        case .freeLLM:
+            return freeLLMSummaryModels
         case .agnes:
             return agnesOrganizerModels
         }
@@ -222,7 +224,7 @@ enum LLMProviderCatalog {
         let id = modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch providerID {
         case .groq: return groqKnownFreeTextModels[id] != nil
-        case .nvidia: return nvidiaKnownFreeSummaryModels[id] != nil
+        case .freeLLM: return id == defaultFreeLLMSummaryModelName
         case .agnes: return id == defaultAgnesOrganizerModelName
         }
     }
@@ -265,8 +267,24 @@ enum LLMProviderCatalog {
         provider(for: .groq)
     }
 
-    static var nvidiaSummaryProvider: LLMProvider? {
-        provider(for: .nvidia)
+    static func freeLLMSummaryProvider(baseURL: String = defaultFreeLLMBaseURL) -> LLMProvider? {
+        guard let baseURL = normalizedBaseURL(baseURL),
+              let chatURL = URL(string: "\(baseURL)/v1/chat/completions"),
+              let modelsURL = URL(string: "\(baseURL)/v1/models"),
+              let dashboardURL = URL(string: "\(baseURL)/models/chat")
+        else { return nil }
+        return LLMProvider(
+            id: .freeLLM,
+            displayName: "FreeLLMAPI",
+            modelName: defaultFreeLLMSummaryModelName,
+            chatCompletionsURL: chatURL,
+            modelsURL: modelsURL,
+            getAPIKeyURL: dashboardURL,
+            keychainAccount: "freellm_api_key",
+            keyPlaceholder: "FreeLLMAPI Key",
+            requiredKeyPrefix: nil,
+            timeout: 25
+        )
     }
 
     static var agnesOrganizerProvider: LLMProvider? {
@@ -284,15 +302,14 @@ enum LLMProviderCatalog {
         credential(for: .groq, from: keys, selectedModelNames: selectedModelNames)
     }
 
-    static func nvidiaSummaryCredential(from keys: [LLMProviderID: String]) -> LLMProviderCredential? {
-        credential(for: .nvidia, from: keys)
-    }
-
-    static func nvidiaSummaryCredential(
+    static func freeLLMSummaryCredential(
         from keys: [LLMProviderID: String],
-        selectedModelNames: [LLMProviderID: String]
+        baseURL: String = defaultFreeLLMBaseURL
     ) -> LLMProviderCredential? {
-        credential(for: .nvidia, from: keys, selectedModelNames: selectedModelNames)
+        guard let provider = freeLLMSummaryProvider(baseURL: baseURL) else { return nil }
+        let key = keys[.freeLLM, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard provider.acceptsKey(key) else { return nil }
+        return LLMProviderCredential(provider: provider, apiKey: key)
     }
 
     static func agnesOrganizerCredential(from keys: [LLMProviderID: String]) -> LLMProviderCredential? {
@@ -380,6 +397,13 @@ enum LLMProviderCatalog {
         modelName?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func normalizedBaseURL(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased()) else { return nil }
+        return trimmed
+    }
+
     private static let groqKnownFreeTextModels: [String: Int] = [
         defaultGroqModelName: 100,
         "openai/gpt-oss-120b": 98,
@@ -395,18 +419,11 @@ enum LLMProviderCatalog {
         "compound-beta-mini": 60
     ]
 
-    private static let nvidiaKnownFreeSummaryModels: [String: Int] = [
-        defaultNvidiaSummaryModelName: 100,
-        "nvidia/nemotron-3-nano-30b-a3b": 92,
-        "nvidia/llama-3.1-nemotron-70b-instruct": 86,
-        "meta/llama-3.1-70b-instruct": 72
-    ]
-
     private static func isConfirmedFree(providerID: LLMProviderID, modelID: String) -> Bool {
         let id = modelID.lowercased()
         switch providerID {
         case .groq: return groqKnownFreeTextModels[id] != nil
-        case .nvidia: return nvidiaKnownFreeSummaryModels[id] != nil
+        case .freeLLM: return false
         case .agnes: return id == defaultAgnesOrganizerModelName
         }
     }
@@ -416,13 +433,12 @@ enum LLMProviderCatalog {
         switch providerID {
         case .groq:
             if let score = groqKnownFreeTextModels[id] { return score }
-        case .nvidia:
-            if let score = nvidiaKnownFreeSummaryModels[id] { return score }
+        case .freeLLM:
+            if id == defaultFreeLLMSummaryModelName { return 100 }
         case .agnes:
             if id == defaultAgnesOrganizerModelName { return 100 }
         }
         if id.contains("gpt-oss-120b") { return 98 }
-        if id.contains("super-49b-v1") && !id.contains("v1.5") { return 100 }
         if id.contains("gpt-oss-20b") { return 94 }
         if id.contains("70b") { return 86 }
         if id.contains("49b") { return 84 }

@@ -8,7 +8,7 @@ enum SelfCheckScope: Equatable {
 }
 
 // MARK: - 🎙️ 主力同传引擎 ViewModel（对应 Python WhisperTranscriptionApp）
-// Sherpa-onnx 实时流式 + WhisperKit 本地精校 + Groq LLM 格式化 + 多引擎翻译 + NVIDIA 中文总结
+// Sherpa-onnx 实时流式 + WhisperKit 本地精校 + Groq LLM 格式化 + FreeLLMAPI 中文总结
 
 @MainActor
 final class TranscriptionViewModel: ObservableObject {
@@ -54,6 +54,8 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var selectedNoteRecord: NoteRecord?
     @Published var notePreviewText: String = ""
     @Published var notePreviewStatus: String = ""
+    @Published private(set) var noteWriteError: String?
+    @Published var meetingRightPanelMode: MeetingRightPanelMode = .summary
     @Published private(set) var meetings: [MeetingRecord] = []
     @Published private(set) var selectedMeeting: MeetingRecord?
     @Published private(set) var selectedMeetingSegments: [TranscriptSegmentRecord] = []
@@ -93,11 +95,10 @@ final class TranscriptionViewModel: ObservableObject {
             selectedRevisionID: selectedMeetingRevisionID
         )
     }
-    @AppStorage("whisperRefinementMode") var whisperRefinementModeRaw = WhisperRefinementMode.smartHybrid.rawValue
     @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
     @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
     @AppStorage("groqCoreModelName") var groqCoreModelName: String = LLMProviderCatalog.defaultGroqModelName
-    @AppStorage("nvidiaSummaryModelName") var nvidiaSummaryModelName: String = LLMProviderCatalog.defaultNvidiaSummaryModelName
+    @AppStorage("freeLLMBaseURL") var freeLLMBaseURL: String = LLMProviderCatalog.defaultFreeLLMBaseURL
     @AppStorage("agnesOrganizerModelName") var agnesOrganizerModelName: String = LLMProviderCatalog.defaultAgnesOrganizerModelName
     @AppStorage("historyDisplayMode") var historyDisplayModeRaw: String = HistoryDisplayMode.defaultMode.rawValue
     @AppStorage("audioInputSelection") private var audioInputSelectionStorage: String = AudioInputSelection.defaultSelectionStorageValue
@@ -108,10 +109,6 @@ final class TranscriptionViewModel: ObservableObject {
     var currentCourse: CourseSubject?
     var pauseVal: Double = 0.6
     var hardCutVal: Double = 20.0
-    var whisperRefinementMode: WhisperRefinementMode {
-        get { WhisperRefinementMode.fromStorageValue(whisperRefinementModeRaw) }
-        set { whisperRefinementModeRaw = WhisperRefinementMode.smartHybrid.rawValue }
-    }
     var noteFileFormat: NoteFileFormat {
         get { NoteFileFormat(rawValue: noteFileFormatRaw) ?? .markdown }
         set { noteFileFormatRaw = newValue.rawValue }
@@ -132,7 +129,6 @@ final class TranscriptionViewModel: ObservableObject {
     var selectedProviderModelNames: [LLMProviderID: String] {
         [
             .groq: groqCoreModelName,
-            .nvidia: nvidiaSummaryModelName,
             .agnes: agnesOrganizerModelName
         ]
     }
@@ -168,25 +164,27 @@ final class TranscriptionViewModel: ObservableObject {
     // Services
     private let speechEngine = SpeechEngine()
     private let systemAudioCaptureEngine = SystemAudioCaptureEngine()
-    private let audioCaptureCoordinator = AudioCaptureCoordinator()
     private let sherpaService = SherpaService()
     private let whisperKitService = WhisperKitService()
     private let llmService = LLMService()
     private let appleTranslationService: any AppleSystemTranslating
     private let translationService: TranslationService
-    private let nvidiaSummaryService = NvidiaSummaryService()
+    private let freeLLMSummaryService = FreeLLMSummaryService()
     private let agnesHistoryOrganizerService = AgnesHistoryOrganizerService()
     private let speakerDiarizationService = SpeakerDiarizationService()
     private let sessionAudioStore = SessionAudioStore()
     private let sessionRecoveryJournal = SessionRecoveryJournal()
     private let diagnosticsLogger = PipelineDiagnosticsLogger()
     private let noteExportService = NoteExportService()
+    private let noteWriteCoordinator = NoteWriteCoordinator()
+    private var noteWriteRevision: UInt64 = 0
     private var meetingLibraryController: MeetingLibraryController?
     private var revisionWorkspaceController: RevisionWorkspaceController?
     private var importWorkspaceController: ImportWorkspaceController?
     private var livePersistenceSession: LivePersistenceSession?
     private var sessionGeneration: UInt64 = 0
     private var sessionCaptureStartedAt: ContinuousClock.Instant?
+    private var finalPersistenceSucceeded = true
     private var timedSegments: [UUID: (start: TimeInterval, end: TimeInterval, draft: String)] = [:]
     private let appServices: AppServices
     private var sessionCoordinator: SessionCoordinator?
@@ -272,7 +270,6 @@ final class TranscriptionViewModel: ObservableObject {
         selectedAudioCaptureSource = Self.mirroredAudioCaptureSource(for: audioInputSelection)
         audioInputSelectionStorage = audioInputSelection.storageValue
         audioCaptureSourceStorage = selectedAudioCaptureSource.storageValue
-        whisperRefinementModeRaw = WhisperRefinementMode.smartHybrid.rawValue
         if hadDeprecatedApplicationAudio {
             audioCaptureSourceStatus = "已切换为麦克风 + 电脑音频，避免应用捕获授权冲突"
         }
@@ -296,7 +293,7 @@ final class TranscriptionViewModel: ObservableObject {
     private func selectProviderModel(_ modelID: String, for providerID: LLMProviderID) {
         switch providerID {
         case .groq: groqCoreModelName = modelID
-        case .nvidia: nvidiaSummaryModelName = modelID
+        case .freeLLM: break
         case .agnes: agnesOrganizerModelName = modelID
         }
         noteProviderModelSelectionChanged()
@@ -343,23 +340,26 @@ final class TranscriptionViewModel: ObservableObject {
 
     func selectMeeting(_ meeting: MeetingRecord) {
         guard !isRecording, !isFinalizingSession else { return }
+        meetingRightPanelMode = .summary
         clearNotePreview()
         selectMeetingData(meeting)
     }
 
     func selectMeetingForNavigation(_ meeting: MeetingRecord) async {
         guard !isRecording, !isFinalizingSession else { return }
-        guard let note = Self.legacyNoteRecord(for: meeting) else {
+        guard let note = Self.meetingNoteRecord(for: meeting) else {
             selectMeeting(meeting)
             return
         }
         selectMeetingData(meeting)
+        meetingRightPanelMode = meeting.source == .legacyImported ? .note : .summary
         await loadNotePreview(note)
     }
 
     func selectNoteForNavigation(_ record: NoteRecord) async {
         guard !isRecording, !isFinalizingSession else { return }
         clearSelectedMeeting()
+        meetingRightPanelMode = .note
         await loadNotePreview(record)
     }
 
@@ -369,9 +369,9 @@ final class TranscriptionViewModel: ObservableObject {
         notePreviewStatus = ""
     }
 
-    nonisolated static func legacyNoteRecord(for meeting: MeetingRecord) -> NoteRecord? {
-        guard meeting.source == .legacyImported,
-              let path = meeting.legacyNotePath,
+    nonisolated static func meetingNoteRecord(for meeting: MeetingRecord) -> NoteRecord? {
+        let path = meeting.source == .legacyImported ? meeting.legacyNotePath : meeting.exportedNotePath
+        guard let path,
               !path.isEmpty else { return nil }
         let url = URL(fileURLWithPath: path).standardizedFileURL
         guard let format = NoteFileFormat.fromFileExtension(url.pathExtension) else { return nil }
@@ -699,6 +699,8 @@ final class TranscriptionViewModel: ObservableObject {
     ) -> [NoteRecord] {
         let indexedPaths = Set(meetings.compactMap(\.legacyNotePath).map {
             URL(fileURLWithPath: $0).standardizedFileURL.path
+        } + meetings.compactMap(\.exportedNotePath).map {
+            URL(fileURLWithPath: $0).standardizedFileURL.path
         })
         return records.filter { !indexedPaths.contains($0.url.standardizedFileURL.path) }
     }
@@ -717,6 +719,38 @@ final class TranscriptionViewModel: ObservableObject {
             guard selectedNoteRecord?.id == record.id else { return }
             notePreviewText = ""
             notePreviewStatus = "读取失败：\(error.localizedDescription)\n\(record.url.path)"
+        }
+    }
+
+    func reexportSelectedMeetingNote() async {
+        guard let meeting = selectedMeeting,
+              let path = meeting.exportedNotePath,
+              let format = NoteFileFormat.fromFileExtension(URL(fileURLWithPath: path).pathExtension)
+        else { return }
+        let items = selectedMeetingSegments.map { segment in
+            TranscriptionItem(
+                id: segment.id,
+                english: segment.refinedText,
+                chinese: selectedMeetingTranslations[segment.id],
+                status: .done,
+                zone: .history,
+                doneTime: segment.endTime,
+                speakerID: segment.speakerID
+            )
+        }
+        do {
+            try noteExportService.export(
+                course: CourseSubject(name: meeting.title, abbrev: meeting.title, keywords: "", meetingFocus: ""),
+                translationEnabled: !selectedMeetingTranslations.isEmpty,
+                items: items,
+                finalSummary: summaryWorkspace?.displayedSummary ?? "",
+                speakerAliases: selectedMeetingSpeakerAliases,
+                format: format,
+                to: URL(fileURLWithPath: path)
+            )
+            if let note = Self.meetingNoteRecord(for: meeting) { await loadNotePreview(note) }
+        } catch {
+            notePreviewStatus = "重新导出失败：\(error.localizedDescription)\n\(path)"
         }
     }
 
@@ -911,18 +945,18 @@ final class TranscriptionViewModel: ObservableObject {
             setStatus(.checking("检查 Apple 系统翻译..."))
             appleTranslationReady = await appleTranslationService.prepare()
 
-            // 6️⃣ Groq 核心 + NVIDIA 总结 + Agnes 整理测试
-            setStatus(.checking("测试 Groq、NVIDIA 与 Agnes..."))
+            // 6️⃣ Groq 核心 + FreeLLMAPI 总结 + Agnes 整理测试
+            setStatus(.checking("测试 Groq、FreeLLMAPI 与 Agnes..."))
             let groqResult = await llmService.testConnectivity(
                 credential: LLMProviderCatalog.groqCoreCredential(
                     from: providerAPIKeys,
                     selectedModelNames: selectedProviderModelNames
                 )
             )
-            let summaryResult = await nvidiaSummaryService.testConnectivity(
-                credential: LLMProviderCatalog.nvidiaSummaryCredential(
+            let summaryResult = await freeLLMSummaryService.testConnectivity(
+                credential: LLMProviderCatalog.freeLLMSummaryCredential(
                     from: providerAPIKeys,
-                    selectedModelNames: selectedProviderModelNames
+                    baseURL: freeLLMBaseURL
                 )
             )
             let agnesResult = await agnesHistoryOrganizerService.testConnectivity(
@@ -940,7 +974,7 @@ final class TranscriptionViewModel: ObservableObject {
             )
             liveSummaryReady = summaryResult.passed
             liveSummaryStatus = liveSummaryReady ? "等待历史内容" : summaryResult.status.displayText
-            print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), NVIDIA summary: \(summaryResult.status.displayText), Agnes organizer: \(agnesResult.status.displayText)")
+            print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), FreeLLMAPI summary: \(summaryResult.status.displayText), Agnes organizer: \(agnesResult.status.displayText)")
 
             publishSelfCheckSummary(
                 microphone: microphoneReady,
@@ -962,7 +996,7 @@ final class TranscriptionViewModel: ObservableObject {
             fullSelfCheckRequired = false
             audioInputCheckRequired = false
             let mode = translationExecutionMode.statusTitle
-            let summarySuffix = liveSummaryReady ? "，NVIDIA 总结可用" : ""
+            let summarySuffix = liveSummaryReady ? "，FreeLLMAPI 总结可用" : ""
             setStatus(apiReady
                 ? .ready("✅ 自检通过：\(course.name) \(mode)\(summarySuffix)")
                 : .ready("🟡 API 未连通：\(course.name) \(mode)"))
@@ -1014,7 +1048,7 @@ final class TranscriptionViewModel: ObservableObject {
             }
 
             let mode = translationExecutionMode.statusTitle
-            let summarySuffix = liveSummaryReady ? "，NVIDIA 总结可用" : ""
+            let summarySuffix = liveSummaryReady ? "，FreeLLMAPI 总结可用" : ""
             setStatus(apiReady
                 ? .ready("✅ 音频输入已通过：\(course.name) \(mode)\(summarySuffix)")
                 : .ready("🟡 音频输入已通过：\(course.name) \(mode)"))
@@ -1215,7 +1249,7 @@ final class TranscriptionViewModel: ObservableObject {
                     self.audioInputSelection.microphoneEnabled ? AudioChunkSource.microphone : nil,
                     self.audioInputSelection.systemAudioEnabled ? AudioChunkSource.systemAudio : nil
                 ].compactMap { $0 })
-                let context = try await sessionCoordinator.begin(title: course.name, subjectID: course.id, enabledSources: sources)
+                let context = try await sessionCoordinator.begin(title: course.name, subjectID: course.id, enabledSources: sources, noteURL: self.filePath)
                 self.sessionContext = context
                 let persistenceSession = context.persistence
                 self.livePersistenceSession = persistenceSession
@@ -1378,7 +1412,7 @@ final class TranscriptionViewModel: ObservableObject {
             historyItems.append(contentsOf: dynamicItems)
             _ = applyLocalHistoryCleanup()
             historyItems.forEach(persistLiveSegment)
-            writeFileNow()
+            queueNoteWrite()
         }
         dynamicItems = []
         draftText = ""
@@ -1418,15 +1452,16 @@ final class TranscriptionViewModel: ObservableObject {
         finalSummaryTask?.cancel()
         finalSummaryTask = nil
         isFinalizingSession = true
+        finalPersistenceSucceeded = true
         canRestart = false
         isLiveSummaryUpdating = false
         liveSummaryStatus = liveSummaryReady ? "整理最终总结中" : "写入笔记中"
     }
 
     private func startFinalSessionSummaryAndWriteNotes() {
-        let credential = LLMProviderCatalog.nvidiaSummaryCredential(
+        let credential = LLMProviderCatalog.freeLLMSummaryCredential(
             from: providerAPIKeys,
-            selectedModelNames: selectedProviderModelNames
+            baseURL: freeLLMBaseURL
         )
         let previousSummary = liveSummaryText
         let fullContent = liveSummarySourceUnits(includeUntranslated: true)
@@ -1434,7 +1469,7 @@ final class TranscriptionViewModel: ObservableObject {
             .joined(separator: "\n\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldRequestDetailedSummary = liveSummaryReady && credential != nil && !fullContent.isEmpty
-        let summaryService = nvidiaSummaryService
+        let summaryService = freeLLMSummaryService
         let template = summaryWorkspace?.selectedTemplate
         let persistenceSession = livePersistenceSession
         let summaryWorkspace = summaryWorkspace
@@ -1457,32 +1492,31 @@ final class TranscriptionViewModel: ObservableObject {
                     sourceContent: fullContent,
                     isFinal: true
                 ) { prompt in
-                    await summaryService.summarize(prompt: prompt, credential: credential, isFinal: true)
+                    try await summaryService.summarize(prompt: prompt, credential: credential, isFinal: true)
                 }
                 if revision?.status == .succeeded { finalSummary = revision?.body }
             }
             await agnesFinalTask.value
 
-            await self?.completeLiveSessionPersistence()
+            let persistenceSucceeded = await self?.completeLiveSessionPersistence() ?? false
 
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                guard let self else { return }
+            guard !Task.isCancelled, let self else { return }
+            self.finalPersistenceSucceeded = persistenceSucceeded
+            if let finalSummary {
+                self.liveSummaryText = finalSummary
+                self.liveSummaryStatus = "正在写入笔记"
+            } else if shouldRequestDetailedSummary {
+                self.liveSummaryStatus = self.liveSummaryText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+                    ? "总结失败，正在写入笔记"
+                    : "总结失败，保留已有总结"
+            } else {
+                self.liveSummaryStatus = "正在写入笔记"
+            }
 
-                if let finalSummary {
-                    self.liveSummaryText = finalSummary
-                    self.liveSummaryStatus = "已写入笔记"
-                } else if shouldRequestDetailedSummary {
-                    self.liveSummaryStatus = self.liveSummaryText
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .isEmpty
-                        ? "总结失败，已写入笔记"
-                        : "总结失败，保留已有总结"
-                } else {
-                    self.liveSummaryStatus = "已写入笔记"
-                }
-
-                self.writeFileNow()
+            let noteResult = await self.writeLatestNote()
+            if case .written = noteResult, persistenceSucceeded {
                 try? self.sessionRecoveryJournal.markCompleted()
                 self.sessionRecoveryJournal.close()
                 self.sessionAudioStore.cleanupCurrentSession()
@@ -1493,8 +1527,19 @@ final class TranscriptionViewModel: ObservableObject {
                 self.isFinalizingSession = false
                 self.canRestart = true
                 self.statusMessage = "笔记已完成"
-                self.renderUI(force: true)
+                self.liveSummaryStatus = finalSummary == nil && shouldRequestDetailedSummary
+                    ? "总结失败，笔记已写入"
+                    : "已写入笔记"
+            } else {
+                self.liveSummaryStatus = persistenceSucceeded ? "笔记写入失败，可重试" : "会话保存失败，恢复数据已保留"
+                self.statusMessage = persistenceSucceeded
+                    ? (self.noteWriteError ?? "笔记写入失败，可重试")
+                    : self.meetingLibraryStatus
+                self.finalSummaryTask = nil
+                self.isFinalizingSession = false
+                self.canRestart = true
             }
+            self.renderUI(force: true)
         }
     }
 
@@ -1523,9 +1568,8 @@ final class TranscriptionViewModel: ObservableObject {
 
     private func stopAudioCapture() {
         speechEngine.stop()
-        Task { [systemAudioCaptureEngine, audioCaptureCoordinator] in
+        Task { [systemAudioCaptureEngine] in
             await systemAudioCaptureEngine.stop()
-            await audioCaptureCoordinator.reset()
         }
     }
 
@@ -1552,8 +1596,8 @@ final class TranscriptionViewModel: ObservableObject {
         sessionCoordinator?.finalizeAudio(context)
     }
 
-    private func completeLiveSessionPersistence() async {
-        guard let coordinator = sessionCoordinator, let context = sessionContext else { return }
+    private func completeLiveSessionPersistence() async -> Bool {
+        guard let coordinator = sessionCoordinator, let context = sessionContext else { return true }
         let segments = historyItems.compactMap { item -> (UUID, TimeInterval, TimeInterval, String?, String, String?, PersistenceStatus)? in
             guard let timing = timedSegments[item.id] else { return nil }
             return (item.id, timing.start, timing.end, timing.draft, item.english, item.speakerID, item.isVisible && item.status != .dropped ? .succeeded : .cancelled)
@@ -1562,10 +1606,15 @@ final class TranscriptionViewModel: ObservableObject {
             try await coordinator.finish(context, finalSegments: segments)
         } catch {
             meetingLibraryStatus = "会话持久化收尾失败：\(error.localizedDescription)"
+            livePersistenceSession = nil
+            sessionContext = nil
+            refreshMeetingLibrary()
+            return false
         }
         livePersistenceSession = nil
         sessionContext = nil
         refreshMeetingLibrary()
+        return true
     }
 
     private func cleanupCancelledStart(generation: UInt64) async {
@@ -1823,7 +1872,7 @@ final class TranscriptionViewModel: ObservableObject {
 
     private func enqueueWhisperItem(uid: UUID, pcm: Data, sherpaText: String) {
         if moveReadyDynamicItemsToHistory(forceLeadingCompleted: true) {
-            syncFileOnQueue()
+            queueNoteWrite()
         }
         let isAccentPlaceholder = WhisperKitService.isAccentAnalysisPlaceholder(sherpaText)
         if !isAccentPlaceholder,
@@ -2456,7 +2505,7 @@ final class TranscriptionViewModel: ObservableObject {
             whisperWorkerTask2?.cancel()
             degradePendingWorkForFinalNote()
             refinementLoadState = .protecting
-            writeFileNow()
+            queueNoteWrite()
             startWhisperWorker()
         }
         Task { [speakerDiarizationService, whisperKitService] in
@@ -2510,7 +2559,7 @@ final class TranscriptionViewModel: ObservableObject {
         try? sessionRecoveryJournal.recordTranslation(uid: uid, chinese: zhText)
         historyItems[idx].status = .done
         historyItems[idx].doneTime = now
-        syncFileOnQueue()
+        queueNoteWrite()
         maybeRequestLiveSummary()
         renderUI(force: true)
     }
@@ -2542,7 +2591,7 @@ final class TranscriptionViewModel: ObservableObject {
         }
 
         if movedToHistory {
-            syncFileOnQueue()
+            queueNoteWrite()
         }
         if movedToHistory || clearedDraft {
             renderUI(force: true)
@@ -2555,7 +2604,7 @@ final class TranscriptionViewModel: ObservableObject {
         lastRenderTime = now
 
         if moveReadyDynamicItemsToHistory(now: now) {
-            syncFileOnQueue()
+            queueNoteWrite()
         }
         refreshTranslationOnlyHistoryBlocks(forceAgnes: false)
     }
@@ -2718,7 +2767,7 @@ final class TranscriptionViewModel: ObservableObject {
         isAgnesOrganizing = false
         agnesOrganizationTask = nil
         if let updates, applyAgnesHistoryUpdates(updates) {
-            syncFileOnQueue()
+            queueNoteWrite()
             renderUI(force: true)
         }
 
@@ -2742,7 +2791,7 @@ final class TranscriptionViewModel: ObservableObject {
         )
         guard !Task.isCancelled else { return }
         if let updates, applyAgnesHistoryUpdates(updates) {
-            syncFileOnQueue()
+            queueNoteWrite()
             renderUI(force: true)
         }
     }
@@ -2911,6 +2960,27 @@ final class TranscriptionViewModel: ObservableObject {
         refreshNoteRecords()
     }
 
+    func retryNoteWrite() {
+        Task { [weak self] in
+            guard let self else { return }
+            if case .written = await writeLatestNote() {
+                guard finalPersistenceSucceeded else {
+                    statusMessage = meetingLibraryStatus
+                    liveSummaryStatus = "会话保存失败，恢复数据已保留"
+                    renderUI(force: true)
+                    return
+                }
+                try? sessionRecoveryJournal.markCompleted()
+                sessionRecoveryJournal.close()
+                sessionAudioStore.cleanupCurrentSession()
+                statusMessage = "笔记已完成"
+                liveSummaryStatus = "已写入笔记"
+                refreshNoteRecords()
+                renderUI(force: true)
+            }
+        }
+    }
+
     private func setupFilePath() {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd_HH-mm"
@@ -2951,48 +3021,52 @@ final class TranscriptionViewModel: ObservableObject {
         return URL(fileURLWithPath: expanded, isDirectory: true)
     }
 
-    private func syncFile() {
-        guard let course = currentCourse else { return }
-        let items = historyItems + dynamicItems
-        let path = filePath
-        let on = translationEnabled
-        let summary = liveSummaryText
-        let format = noteFileFormat
-        let aliases = currentSessionSpeakerAliases()
-        let exporter = noteExportService
-        DispatchQueue.global(qos: .utility).async {
-            guard let path else { return }
-            try? exporter.export(course: course, translationEnabled: on, items: items, finalSummary: summary, speakerAliases: aliases, format: format, to: path)
+    private func queueNoteWrite() {
+        guard let write = makeNoteWrite() else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await noteWriteCoordinator.write(content: write.content, to: write.url, revision: write.revision)
+            handleNoteWriteResult(result)
         }
     }
 
-    private func syncFileOnQueue() {
-        guard let course = self.currentCourse else { return }
-        let path = self.filePath
-        let on = self.translationEnabled
-        let items = self.historyItems + self.dynamicItems
-        let summary = self.liveSummaryText
-        let format = self.noteFileFormat
-        let aliases = currentSessionSpeakerAliases()
-        let exporter = noteExportService
-        DispatchQueue.global(qos: .utility).async {
-            guard let path else { return }
-            try? exporter.export(course: course, translationEnabled: on, items: items, finalSummary: summary, speakerAliases: aliases, format: format, to: path)
+    private func writeLatestNote() async -> NoteWriteResult {
+        guard let write = makeNoteWrite() else {
+            let url = filePath ?? Self.defaultNoteDirectory()
+            return .failed(url, "缺少课程或笔记路径")
         }
+        let result = await noteWriteCoordinator.write(content: write.content, to: write.url, revision: write.revision)
+        handleNoteWriteResult(result)
+        return result
     }
 
-    private func writeFileNow() {
-        guard let course = currentCourse else { return }
-        guard let filePath else { return }
-        try? noteExportService.export(
-            course: course,
-            translationEnabled: translationEnabled,
-            items: historyItems + dynamicItems,
-            finalSummary: liveSummaryText,
-            speakerAliases: currentSessionSpeakerAliases(),
-            format: noteFileFormat,
-            to: filePath
+    private func makeNoteWrite() -> (content: String, url: URL, revision: UInt64)? {
+        guard let course = currentCourse, let filePath else { return nil }
+        noteWriteRevision &+= 1
+        return (
+            SessionNoteRenderer.render(
+                course: course,
+                translationEnabled: translationEnabled,
+                items: historyItems + dynamicItems,
+                finalSummary: liveSummaryText,
+                speakerAliases: currentSessionSpeakerAliases(),
+                format: noteFileFormat
+            ),
+            filePath,
+            noteWriteRevision
         )
+    }
+
+    private func handleNoteWriteResult(_ result: NoteWriteResult) {
+        switch result {
+        case .written:
+            noteWriteError = nil
+        case .skipped:
+            break
+        case .failed(let url, let detail):
+            noteWriteError = "无法写入 \(url.path)：\(detail)"
+            statusMessage = noteWriteError ?? "笔记写入失败"
+        }
     }
 
     private func currentSessionSpeakerAliases() -> [String: String] {
@@ -3005,9 +3079,9 @@ final class TranscriptionViewModel: ObservableObject {
         guard liveSummaryReady,
               !isFinalizingSession,
               !isLiveSummaryUpdating,
-              let credential = LLMProviderCatalog.nvidiaSummaryCredential(
+              let credential = LLMProviderCatalog.freeLLMSummaryCredential(
                 from: providerAPIKeys,
-                selectedModelNames: selectedProviderModelNames
+                baseURL: freeLLMBaseURL
               )
         else { return }
 
@@ -3022,7 +3096,7 @@ final class TranscriptionViewModel: ObservableObject {
 
         let previousSummary = liveSummaryText
         let countAtRequest = units.count
-        let summaryService = nvidiaSummaryService
+        let summaryService = freeLLMSummaryService
         guard let template = summaryWorkspace?.selectedTemplate else { return }
         guard let persistenceSession = livePersistenceSession, let summaryWorkspace else { return }
         isLiveSummaryUpdating = true
@@ -3040,7 +3114,7 @@ final class TranscriptionViewModel: ObservableObject {
                 sourceContent: newContent,
                 isFinal: false
             ) { prompt in
-                await summaryService.summarize(prompt: prompt, credential: credential, isFinal: false)
+                try await summaryService.summarize(prompt: prompt, credential: credential, isFinal: false)
             }
             let summary = revision?.status == .succeeded ? revision?.body : nil
             guard !Task.isCancelled else { return }
@@ -3052,7 +3126,7 @@ final class TranscriptionViewModel: ObservableObject {
                     self.liveSummaryText = summary
                     self.liveSummaryStatus = "已更新"
                     self.liveSummaryCursor.markSummarized(upTo: countAtRequest)
-                    self.syncFileOnQueue()
+                    self.queueNoteWrite()
                     self.renderUI(force: true)
                     self.maybeRequestLiveSummary()
                 } else {

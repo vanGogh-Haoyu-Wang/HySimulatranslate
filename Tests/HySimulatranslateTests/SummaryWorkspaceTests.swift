@@ -51,7 +51,7 @@ final class SummaryWorkspaceTests: XCTestCase {
 
     func testTemplatePromptContainsInstructionLanguageSectionsAndFinalMode() throws {
         let template = SummaryTemplateRecord(name: "Class", language: "zh-CN", systemInstruction: "只总结课程", structureJSON: "[\"概念\",\"复习\"]")
-        let prompt = try NvidiaSummaryService.makePrompt(template: template, previousSummary: "旧总结", content: "新内容", isFinal: true)
+        let prompt = try FreeLLMSummaryService.makePrompt(template: template, previousSummary: "旧总结", content: "新内容", isFinal: true)
         XCTAssertTrue(prompt.contains("只总结课程"))
         XCTAssertTrue(prompt.contains("zh-CN"))
         XCTAssertTrue(prompt.contains("概念、复习"))
@@ -82,7 +82,7 @@ final class SummaryWorkspaceTests: XCTestCase {
         XCTAssertTrue(try templates.fetchAll().contains(where: { $0.id == custom.id }))
     }
 
-    func testLiveAndFinalSummaryGenerationsAccumulateRevisionsAndFailedHistoryIsNotSelectable() async throws {
+    func testLiveFailureIsRecordedWhileSuccessfulAndFinalSummariesRemainSelectable() async throws {
         let database = try AppDatabase.inMemory()
         let meetings = MeetingRepository(database: database)
         let transcripts = TranscriptRepository(database: database)
@@ -94,18 +94,19 @@ final class SummaryWorkspaceTests: XCTestCase {
 
         let live = try await workspace.generate(
             meetingID: meeting.id, transcriptRevisionID: transcript.id, translationRevisionID: nil,
-            template: template, provider: "NVIDIA", model: "m", previousSummary: "", sourceContent: "live content", isFinal: false
+            template: template, provider: "FreeLLMAPI", model: "auto", previousSummary: "", sourceContent: "live content", isFinal: false
         ) { prompt in XCTAssertTrue(prompt.contains("实时更新")); return "live summary" }
         let failed = try await workspace.generate(
             meetingID: meeting.id, transcriptRevisionID: transcript.id, translationRevisionID: nil,
-            template: template, provider: "NVIDIA", model: "m", previousSummary: live.body, sourceContent: "more", isFinal: false
+            template: template, provider: "FreeLLMAPI", model: "auto", previousSummary: live.body, sourceContent: "more", isFinal: false
         ) { _ in nil }
         let final = try await workspace.generate(
             meetingID: meeting.id, transcriptRevisionID: transcript.id, translationRevisionID: nil,
-            template: template, provider: "NVIDIA", model: "m", previousSummary: live.body, sourceContent: "all content", isFinal: true
+            template: template, provider: "FreeLLMAPI", model: "auto", previousSummary: live.body, sourceContent: "all content", isFinal: true
         ) { prompt in XCTAssertTrue(prompt.contains("最终总结")); return "final summary" }
 
         workspace.load(meeting: try meetings.fetch(id: meeting.id))
+        XCTAssertEqual(failed.status, .failed)
         XCTAssertEqual(workspace.summaryRevisions.map(\.id), [live.id, failed.id, final.id])
         XCTAssertEqual(workspace.selectableSummaryRevisions.map(\.id), [live.id, final.id])
         XCTAssertEqual(workspace.failedSummaryRevisions.map(\.id), [failed.id])
@@ -125,7 +126,7 @@ final class SummaryWorkspaceTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let processor = ImportedAudioPostProcessor(transcripts: transcripts, speakers: speakers, exportDirectory: directory)
 
-        try await processor.export(meetingID: meeting.id, transcriptRevisionID: revision.id, translationRevisionID: nil)
+        _ = try await processor.export(meetingID: meeting.id, transcriptRevisionID: revision.id, translationRevisionID: nil)
 
         let output = try String(contentsOf: directory.appendingPathComponent("Imported-\(meeting.id.uuidString).md"))
         XCTAssertTrue(output.contains("Alice: Hello"))

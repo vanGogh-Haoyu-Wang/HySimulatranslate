@@ -39,6 +39,7 @@ struct WorkspaceCompositionRoot {
     nonisolated static func prepare(noteDirectory: URL) throws -> (AppDatabase, [MeetingRecord], [UUID]) {
         let database = try AppDatabase.open(); let meetings = MeetingRepository(database: database)
         if FileManager.default.fileExists(atPath: noteDirectory.path) { _ = try meetings.indexLegacyNotes(in: noteDirectory) }
+        _ = try meetings.reconcileLegacyExports()
         let purged = try meetings.purgeDeleted(olderThan: Date().addingTimeInterval(-30 * 24 * 60 * 60))
         return (database, try meetings.fetchActive(), purged)
     }

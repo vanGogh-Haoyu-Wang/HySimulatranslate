@@ -12,8 +12,14 @@ VAD_MODEL_SOURCE="${VAD_MODEL_SOURCE:-$APP_SUPPORT_MODEL_ROOT/VAD/silero_vad.onn
 SHERPA_NPM_VERSION="${SHERPA_NPM_VERSION:-1.13.2}"
 SHERPA_NPM_PACKAGE="${SHERPA_NPM_PACKAGE:-sherpa-onnx-darwin-arm64}"
 SHERPA_NPM_BASE_URL="${SHERPA_NPM_BASE_URL:-https://unpkg.com/$SHERPA_NPM_PACKAGE@$SHERPA_NPM_VERSION}"
+SHERPA_C_API_SHA256="${SHERPA_C_API_SHA256:-53e99bd6e6953930eeff7f918d41982d47623027a81d68f5d9cde579b68615be}"
+ONNXRUNTIME_SHA256="${ONNXRUNTIME_SHA256:-c6f77ff18d31bdcbe15a949967327ec6522a996ff47a5d0e6211eb9f64eb2b1a}"
+ONNXRUNTIME_VERSIONED_NAME="${ONNXRUNTIME_VERSIONED_NAME:-libonnxruntime.1.24.4.dylib}"
+ONNXRUNTIME_VERSIONED_SHA256="${ONNXRUNTIME_VERSIONED_SHA256:-4d75a3a175111a84ab6199432af9f8aea0ad8f674ec37df68fde8a7e012e4b4a}"
 SHERPA_MODEL_URL="${SHERPA_MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2}"
 VAD_MODEL_URL="${VAD_MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
+SHERPA_MODEL_SHA256="${SHERPA_MODEL_SHA256:-639e25b578e9e997131402199419c13a941f8e4e198e2da1ce57dbf5cf401282}"
+VAD_MODEL_SHA256="${VAD_MODEL_SHA256:-9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6}"
 
 MODE="${1:---runtime}"
 
@@ -24,10 +30,18 @@ usage() {
 download_file() {
   local url="$1"
   local destination="$2"
+  local expected_sha256="$3"
   mkdir -p "$(dirname "$destination")"
   local temporary
   temporary="$(mktemp "${destination}.tmp.XXXXXX")"
   curl --fail --location --retry 3 --connect-timeout 20 --output "$temporary" "$url"
+  local actual_sha256
+  actual_sha256="$(shasum -a 256 "$temporary" | awk '{print $1}')"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    echo "error: checksum mismatch for $url" >&2
+    rm -f "$temporary"
+    return 1
+  fi
   mv "$temporary" "$destination"
 }
 
@@ -39,16 +53,9 @@ ensure_sherpa_libraries() {
   fi
 
   echo "Downloading sherpa-onnx macOS dynamic libraries..."
-  download_file "$SHERPA_NPM_BASE_URL/libsherpa-onnx-c-api.dylib" "$SHERPA_LIB_DIR/libsherpa-onnx-c-api.dylib"
-  download_file "$SHERPA_NPM_BASE_URL/libonnxruntime.dylib" "$SHERPA_LIB_DIR/libonnxruntime.dylib"
-
-  local versioned_name
-  versioned_name="$(curl --fail --location --silent "$SHERPA_NPM_BASE_URL/" \
-    | sed -n 's/.*href="[^"]*\\(libonnxruntime\\.[0-9][^"/]*\\.dylib\\)".*/\\1/p' \
-    | head -n 1 || true)"
-  if [[ -n "$versioned_name" ]]; then
-    download_file "$SHERPA_NPM_BASE_URL/$versioned_name" "$SHERPA_LIB_DIR/$versioned_name"
-  fi
+  download_file "$SHERPA_NPM_BASE_URL/libsherpa-onnx-c-api.dylib" "$SHERPA_LIB_DIR/libsherpa-onnx-c-api.dylib" "$SHERPA_C_API_SHA256"
+  download_file "$SHERPA_NPM_BASE_URL/libonnxruntime.dylib" "$SHERPA_LIB_DIR/libonnxruntime.dylib" "$ONNXRUNTIME_SHA256"
+  download_file "$SHERPA_NPM_BASE_URL/$ONNXRUNTIME_VERSIONED_NAME" "$SHERPA_LIB_DIR/$ONNXRUNTIME_VERSIONED_NAME" "$ONNXRUNTIME_VERSIONED_SHA256"
 }
 
 ensure_sherpa_model() {
@@ -67,7 +74,7 @@ ensure_sherpa_model() {
   staging="$parent/.download-$(basename "$SHERPA_MODEL_SOURCE")"
   rm -rf "$staging"
   mkdir -p "$parent" "$staging"
-  download_file "$SHERPA_MODEL_URL" "$archive"
+  download_file "$SHERPA_MODEL_URL" "$archive" "$SHERPA_MODEL_SHA256"
   tar -xjf "$archive" -C "$staging"
   extracted="$staging/$(basename "$SHERPA_MODEL_SOURCE")"
   [[ -d "$extracted" ]] || {
@@ -96,7 +103,7 @@ ensure_vad_model() {
   fi
 
   echo "Downloading Silero VAD model..."
-  download_file "$VAD_MODEL_URL" "$VAD_MODEL_SOURCE"
+  download_file "$VAD_MODEL_URL" "$VAD_MODEL_SOURCE" "$VAD_MODEL_SHA256"
 }
 
 case "$MODE" in

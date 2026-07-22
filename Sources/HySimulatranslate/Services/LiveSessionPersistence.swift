@@ -25,9 +25,14 @@ actor LiveSessionPersistence {
     }
 
     @discardableResult
-    func start(title: String, subjectID: UUID?) throws -> LivePersistenceSession {
+    func start(title: String, subjectID: UUID?, exportedNotePath: String? = nil) throws -> LivePersistenceSession {
         guard session == nil else { throw LiveSessionPersistenceError.sessionAlreadyActive }
-        var meeting = MeetingRecord(title: title, subjectID: subjectID, source: .live)
+        var meeting = MeetingRecord(
+            title: title,
+            subjectID: subjectID,
+            source: .live,
+            exportedNotePath: exportedNotePath.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        )
         let revision = TranscriptRevisionRecord(
             meetingID: meeting.id,
             number: 1,
@@ -86,14 +91,15 @@ actor LiveSessionPersistence {
             throw LiveSessionPersistenceError.staleSession
         }
         let duration = Double(assets.totalSamples) / Double(max(1, sampleRate))
+        defer { self.session = nil }
         let candidates: [(AudioTrack, URL?)] = [
             (.microphone, assets.microphoneWAV),
             (.system, assets.systemWAV),
             (.mixed, assets.m4aURL ?? assets.mixedWAV)
         ]
-        for (track, url) in candidates {
-            guard let url, FileManager.default.fileExists(atPath: url.path) else { continue }
-            try meetings.saveAudioAsset(AudioAssetRecord(
+        let records: [AudioAssetRecord] = candidates.compactMap { track, url in
+            guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
+            return AudioAssetRecord(
                 meetingID: session.meetingID,
                 track: track,
                 path: url.path,
@@ -102,10 +108,14 @@ actor LiveSessionPersistence {
                 channelCount: 1,
                 duration: duration,
                 status: .ready
-            ))
+            )
         }
-        try meetings.updateSession(id: session.meetingID, duration: duration, status: .ready)
-        self.session = nil
+        do {
+            try meetings.finishSession(id: session.meetingID, duration: duration, assets: records)
+        } catch {
+            try? meetings.updateSession(id: session.meetingID, duration: duration, status: .failed)
+            throw error
+        }
     }
 
     func fail(session expectedSession: LivePersistenceSession? = nil) throws {
@@ -113,15 +123,15 @@ actor LiveSessionPersistence {
         if let expectedSession, expectedSession != session {
             throw LiveSessionPersistenceError.staleSession
         }
+        defer { self.session = nil }
         try meetings.updateSession(id: session.meetingID, duration: 0, status: .failed)
-        self.session = nil
     }
 
     func abort(session expectedSession: LivePersistenceSession) throws {
         guard let session, session == expectedSession else {
             throw LiveSessionPersistenceError.staleSession
         }
+        defer { self.session = nil }
         try meetings.updateSession(id: session.meetingID, duration: 0, status: .cancelled)
-        self.session = nil
     }
 }
