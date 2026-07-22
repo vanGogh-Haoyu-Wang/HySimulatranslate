@@ -561,7 +561,7 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testAccentAnalysisPlaceholderStillQueuesWhenOnlyInFlightPlaceholderExists() {
+    func testAccentAnalysisPlaceholderStillQueuesWhenOnlyInFlightPlaceholderExists() async {
         let vm = TranscriptionViewModel()
         vm.dynamicItems = [
             TranscriptionItem(
@@ -571,7 +571,7 @@ final class HySimulatranslateTests: XCTestCase {
             )
         ]
 
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: Data(repeating: 0, count: 64_000),
             sherpaText: "[🎤 捕获到口音音频，分析中...]"
@@ -582,15 +582,15 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testQueuedAccentAnalysisPlaceholdersMergeWithoutDroppingAudio() {
+    func testQueuedAccentAnalysisPlaceholdersMergeWithoutDroppingAudio() async {
         let vm = TranscriptionViewModel()
 
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: Data(repeating: 0, count: 64_000),
             sherpaText: "[🎤 捕获到口音音频，分析中...]"
         )
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: Data(repeating: 1, count: 64_000),
             sherpaText: "[🎤 捕获到口音音频，分析中...]"
@@ -601,15 +601,15 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testQueuedAccentAnalysisPlaceholdersSplitWhenMergedAudioWouldExceedSixSeconds() {
+    func testQueuedAccentAnalysisPlaceholdersSplitWhenMergedAudioWouldExceedSixSeconds() async {
         let vm = TranscriptionViewModel()
 
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: Data(repeating: 0, count: 100_000),
             sherpaText: "[🎤 捕获到口音音频，分析中...]"
         )
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: Data(repeating: 1, count: 100_000),
             sherpaText: "[🎤 捕获到口音音频，分析中...]"
@@ -620,12 +620,12 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testWhisperQueueNeverExceedsProtectingCapacityAndHighValueOverflowUsesSherpa() {
+    func testWhisperQueueNeverExceedsProtectingCapacityAndHighValueOverflowUsesSherpa() async {
         let vm = TranscriptionViewModel()
         let fiveSecondsPCM = Data(repeating: 1, count: 160_000)
 
         for index in 0..<16 {
-            vm.enqueueWhisperItemForTesting(
+            await vm.enqueueWhisperItemForTesting(
                 uid: UUID(),
                 pcm: fiveSecondsPCM,
                 sherpaText: "This is a meaningful lecturer sentence number \(index)."
@@ -638,19 +638,19 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testWhisperQueueAudioNeverExceedsProtectingDuration() {
+    func testWhisperQueueAudioNeverExceedsProtectingDuration() async {
         let vm = TranscriptionViewModel()
         let twentyFiveSecondsPCM = Data(repeating: 1, count: 800_000)
         let twentySecondsPCM = Data(repeating: 1, count: 640_000)
 
         for index in 0..<2 {
-            vm.enqueueWhisperItemForTesting(
+            await vm.enqueueWhisperItemForTesting(
                 uid: UUID(),
                 pcm: twentyFiveSecondsPCM,
                 sherpaText: "This is sustained high value lecture content number \(index)."
             )
         }
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: twentySecondsPCM,
             sherpaText: "This third substantial segment should use the Sherpa draft."
@@ -662,10 +662,10 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testStopDegradesPendingWhisperItemsToCompletedSherpaText() {
+    func testStopDegradesPendingWhisperItemsToCompletedSherpaText() async {
         let vm = TranscriptionViewModel()
         vm.isRecording = true
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: UUID(),
             pcm: Data(repeating: 1, count: 64_000),
             sherpaText: "Pending lecturer content must survive stopping."
@@ -673,6 +673,7 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(vm.whisperQueueSize, 1)
 
         vm.stopTranscription()
+        try? await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(vm.whisperQueueSize, 0)
         XCTAssertTrue(
@@ -1296,7 +1297,7 @@ final class HySimulatranslateTests: XCTestCase {
         vm.translationEnabled = true
         let uid = UUID()
 
-        vm.enqueueWhisperItemForTesting(
+        await vm.enqueueWhisperItemForTesting(
             uid: uid,
             pcm: Data(repeating: 1, count: 64_000),
             sherpaText: "This is a meaningful Sherpa preview sentence."
@@ -2517,34 +2518,35 @@ final class HySimulatranslateTests: XCTestCase {
     }
 
     @MainActor
-    func testLLMFormatCandidatesBatchBeforeQueuedReview() {
+    func testLLMFormatCandidatesBatchBeforeQueuedReview() async {
         let vm = TranscriptionViewModel()
         vm.apiReady = true
         let first = UUID()
         let second = UUID()
         let third = UUID()
 
-        vm.enqueueLLMFormatCandidateForTesting(
+        await vm.enqueueLLMFormatCandidateForTesting(
             uid: first,
             text: "Whisper first.",
             sherpaText: "Sherpa first."
         )
-        vm.enqueueLLMFormatCandidateForTesting(
+        await vm.enqueueLLMFormatCandidateForTesting(
             uid: second,
             text: "Whisper second.",
             sherpaText: "Sherpa second."
         )
 
-        XCTAssertEqual(vm.queuedLLMItemsForTesting.count, 0)
+        let initiallyQueued = await vm.queuedLLMItemsForTesting()
+        XCTAssertEqual(initiallyQueued.count, 0)
         XCTAssertEqual(vm.llmQueueSize, 2)
 
-        vm.enqueueLLMFormatCandidateForTesting(
+        await vm.enqueueLLMFormatCandidateForTesting(
             uid: third,
             text: "Whisper third.",
             sherpaText: "Sherpa third."
         )
 
-        let queued = vm.queuedLLMItemsForTesting
+        let queued = await vm.queuedLLMItemsForTesting()
         XCTAssertEqual(queued.count, 1)
         XCTAssertEqual(queued.first?.sourceIDs, [first, second, third])
         XCTAssertTrue(queued.first?.whisperText.contains("1. Whisper first.") == true)

@@ -31,18 +31,23 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
     @Published private(set) var progressByResource: [String: Double] = [:]
     @Published private(set) var statusByResource: [String: String] = [:]
     @Published private(set) var selectedModelIDs: [LLMProviderID: String] = [:]
+    @Published private(set) var providerCheckResults: [LLMProviderCheckResult] = []
+    @Published private(set) var apiReady = false
     @Published private(set) var lastError: String?
     @Published var pendingDeletion: ModelDeletionRequest?
+    private(set) var providerAPIKeys: [LLMProviderID: String] = [:]
     private let resourceService: ModelResourceService
     private let providerKeys: () -> [LLMProviderID: String]
     private let cloudClient: any ModelCenterCloudClient
     private let installer: Installer
     private var onModelSelectionChanged: @MainActor (LLMProviderID, String) -> Void
+    private var connectivityRecords: [String: LLMProviderModelConnectivityRecord]
 
     init(resourceService: ModelResourceService = .shared, providerKeys: @escaping () -> [LLMProviderID: String] = { KeychainManager.shared.loadProviderKeys() }, selectedModels: @escaping () -> [LLMProviderID: String] = { [:] }, onModelSelectionChanged: @escaping @MainActor (LLMProviderID, String) -> Void = { _, _ in }, cloudClient: any ModelCenterCloudClient = DefaultModelCenterCloudClient(), installer: @escaping Installer = ModelCenterViewModel.defaultInstaller) {
         self.resourceService = resourceService; self.providerKeys = providerKeys; self.cloudClient = cloudClient; self.installer = installer
         self.selectedModelIDs = selectedModels()
         self.onModelSelectionChanged = onModelSelectionChanged
+        self.connectivityRecords = Self.loadConnectivityRecords()
         do {
             try resourceService.migrateLegacyManagedModelsIfNeeded()
         } catch {
@@ -63,7 +68,56 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
     func selectModel(_ modelID: String, for providerID: LLMProviderID) {
         guard !modelID.isEmpty else { return }
         selectedModelIDs[providerID] = modelID
+        if let key = Self.modelStorageKey(for: providerID) {
+            UserDefaults.standard.set(modelID, forKey: key)
+        }
         onModelSelectionChanged(providerID, modelID)
+    }
+    var selectedProviderModelNames: [LLMProviderID: String] {
+        [
+            .groq: selectedModelIDs[.groq] ?? LLMProviderCatalog.defaultGroqModelName,
+            .agnes: selectedModelIDs[.agnes] ?? LLMProviderCatalog.defaultAgnesOrganizerModelName
+        ]
+    }
+    @discardableResult
+    func updateProviderAPIKeys(_ keys: [LLMProviderID: String]) -> Bool {
+        let changed = providerAPIKeys != keys
+        providerAPIKeys = keys
+        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
+            from: keys,
+            testedResults: changed ? [] : providerCheckResults,
+            selectedModelNames: selectedProviderModelNames
+        )
+        if changed { apiReady = false }
+        return changed
+    }
+    func setAPIReady(_ ready: Bool) { apiReady = ready }
+    func setProviderCheckResults(_ results: [LLMProviderCheckResult]) {
+        providerCheckResults = results
+        apiReady = results.first(where: { $0.provider.id == .groq })?.passed == true
+    }
+    func invalidateConnectivity() {
+        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
+            from: providerAPIKeys,
+            testedResults: [],
+            selectedModelNames: selectedProviderModelNames
+        )
+        apiReady = false
+    }
+    func testConnectivity(
+        llm: LLMService,
+        summary: FreeLLMSummaryService,
+        agnes: AgnesHistoryOrganizerService,
+        freeLLMBaseURL: String
+    ) async -> [LLMProviderCheckResult] {
+        let results = [
+            await llm.testConnectivity(credential: LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)),
+            await summary.testConnectivity(credential: LLMProviderCatalog.freeLLMSummaryCredential(from: providerAPIKeys, baseURL: freeLLMBaseURL)),
+            await agnes.testConnectivity(credential: LLMProviderCatalog.agnesOrganizerCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames))
+        ]
+        setProviderCheckResults(results)
+        recordConnectivity(results)
+        return results
     }
     func visibleModels(for providerID: LLMProviderID, scope: ModelListScope) -> [LLMProviderModel] {
         guard let provider = cloudProviders.first(where: { $0.id == providerID }) else { return [] }
@@ -75,7 +129,7 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
     }
     func rescan() { localResources = resourceService.scan() }
     func refreshCloud() async {
-        let keys = providerKeys(); var result: [CloudModelProviderState] = []
+        let keys = providerAPIKeys.isEmpty ? providerKeys() : providerAPIKeys; var result: [CloudModelProviderState] = []
         for id in LLMProviderCatalog.modelCenterProviderIDs {
             guard let key = keys[id], !key.isEmpty else { result.append(.init(id: id, configured: false, models: [], connectivity: .notConfigured)); continue }
             do {
@@ -138,6 +192,44 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
             progress(1, "SpeakerKit 模型已就绪")
             return location
         default: throw ModelResourceError.resourceMissing
+        }
+    }
+
+    private func recordConnectivity(_ results: [LLMProviderCheckResult]) {
+        for result in results {
+            let status: LLMProviderModelConnectivityStatus
+            let detail: String
+            switch result.status {
+            case .passed: status = .passed; detail = ""
+            case .failed(let reason): status = .failed; detail = reason
+            case .notConfigured: continue
+            }
+            let key = LLMProviderCatalog.connectivityKey(providerID: result.provider.id, modelID: result.provider.modelName)
+            connectivityRecords[key] = .init(
+                providerID: result.provider.id,
+                modelID: result.provider.modelName,
+                status: status,
+                detail: detail,
+                testedAt: Date()
+            )
+        }
+        guard let data = try? JSONEncoder().encode(Array(connectivityRecords.values)) else { return }
+        UserDefaults.standard.set(String(decoding: data, as: UTF8.self), forKey: "providerModelConnectivityRecordsJSON")
+    }
+
+    private static func loadConnectivityRecords() -> [String: LLMProviderModelConnectivityRecord] {
+        guard let json = UserDefaults.standard.string(forKey: "providerModelConnectivityRecordsJSON"),
+              let data = json.data(using: .utf8),
+              let records = try? JSONDecoder().decode([LLMProviderModelConnectivityRecord].self, from: data)
+        else { return [:] }
+        return LLMProviderCatalog.connectivityRecordsByKey(records)
+    }
+
+    private static func modelStorageKey(for providerID: LLMProviderID) -> String? {
+        switch providerID {
+        case .groq: "groqCoreModelName"
+        case .agnes: "agnesOrganizerModelName"
+        case .freeLLM: nil
         }
     }
 }

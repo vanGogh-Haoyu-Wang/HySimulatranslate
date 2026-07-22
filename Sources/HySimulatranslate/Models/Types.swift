@@ -147,12 +147,12 @@ struct CourseSubject: Identifiable, Codable, Equatable, Sendable {
 }
 
 // MARK: - LLM Format Queue Item
-enum LLMTaskType: String {
+enum LLMTaskType: String, Sendable {
     case format
     case aggregate
 }
 
-struct LLMQueueItem {
+struct LLMQueueItem: Sendable {
     let priority: Int
     let timestamp: TimeInterval
     let taskType: LLMTaskType
@@ -164,7 +164,7 @@ struct LLMQueueItem {
 }
 
 // MARK: - Whisper Queue Item
-struct WhisperQueueItem {
+struct WhisperQueueItem: Sendable {
     let uid: UUID
     var pcmData: Data
     let sherpaTextBackup: String

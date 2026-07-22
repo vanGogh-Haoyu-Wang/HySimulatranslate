@@ -37,8 +37,6 @@ final class TranscriptionViewModel: ObservableObject {
     @Published var whisperReady = false
     @Published var speakerKitReady = false
     @Published var appleTranslationReady = false
-    @Published var apiReady = false
-    @Published var providerCheckResults: [LLMProviderCheckResult] = []
     @Published var liveSummaryText: String = ""
     @Published var liveSummaryStatus: String = "未配置"
     @Published var liveSummaryReady = false
@@ -97,15 +95,30 @@ final class TranscriptionViewModel: ObservableObject {
     }
     @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
     @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
-    @AppStorage("groqCoreModelName") var groqCoreModelName: String = LLMProviderCatalog.defaultGroqModelName
     @AppStorage("freeLLMBaseURL") var freeLLMBaseURL: String = LLMProviderCatalog.defaultFreeLLMBaseURL
-    @AppStorage("agnesOrganizerModelName") var agnesOrganizerModelName: String = LLMProviderCatalog.defaultAgnesOrganizerModelName
     @AppStorage("historyDisplayMode") var historyDisplayModeRaw: String = HistoryDisplayMode.defaultMode.rawValue
     @AppStorage("audioInputSelection") private var audioInputSelectionStorage: String = AudioInputSelection.defaultSelectionStorageValue
     @AppStorage("audioCaptureSource") private var audioCaptureSourceStorage: String = AudioCaptureSource.microphoneStorageValue
-    @AppStorage("providerModelConnectivityRecordsJSON") private var providerModelConnectivityRecordsJSON: String = ""
-
-    var providerAPIKeys: [LLMProviderID: String] = [:]
+    var providerAPIKeys: [LLMProviderID: String] {
+        get { modelCenterViewModel.providerAPIKeys }
+        set { _ = modelCenterViewModel.updateProviderAPIKeys(newValue) }
+    }
+    var providerCheckResults: [LLMProviderCheckResult] {
+        get { modelCenterViewModel.providerCheckResults }
+        set { modelCenterViewModel.setProviderCheckResults(newValue) }
+    }
+    var apiReady: Bool {
+        get { modelCenterViewModel.apiReady }
+        set { modelCenterViewModel.setAPIReady(newValue) }
+    }
+    var groqCoreModelName: String {
+        get { modelCenterViewModel.selectedProviderModelNames[.groq] ?? LLMProviderCatalog.defaultGroqModelName }
+        set { modelCenterViewModel.selectModel(newValue, for: .groq) }
+    }
+    var agnesOrganizerModelName: String {
+        get { modelCenterViewModel.selectedProviderModelNames[.agnes] ?? LLMProviderCatalog.defaultAgnesOrganizerModelName }
+        set { modelCenterViewModel.selectModel(newValue, for: .agnes) }
+    }
     var currentCourse: CourseSubject?
     var pauseVal: Double = 0.6
     var hardCutVal: Double = 20.0
@@ -127,10 +140,7 @@ final class TranscriptionViewModel: ObservableObject {
         Self.noteDirectory(from: noteDirectoryPath).path
     }
     var selectedProviderModelNames: [LLMProviderID: String] {
-        [
-            .groq: groqCoreModelName,
-            .agnes: agnesOrganizerModelName
-        ]
+        modelCenterViewModel.selectedProviderModelNames
     }
 
     var canStartTranscription: Bool {
@@ -190,26 +200,23 @@ final class TranscriptionViewModel: ObservableObject {
     private var sessionCoordinator: SessionCoordinator?
     private var sessionContext: SessionCoordinator.Context?
     private var loadedModelLease: ModelResourceLease?
+    private lazy var livePipeline = LiveTranscriptionPipeline(
+        sherpa: sherpaService,
+        whisper: whisperKitService,
+        llm: llmService,
+        translation: translationService
+    )
 
-    // 队列
-    private var whisperQueue: [WhisperQueueItem] = []
-    private var inFlightWhisperItems: [UUID: WhisperQueueItem] = [:]
-    private var llmFormatQueue: [LLMQueueItem] = []
-    private var pendingLLMFormatBatch: [LLMQueueItem] = []
-    private var sourceIDsByLLMPrimaryID: [UUID: [UUID]] = [:]
     private var organizerQueue: [OrganizerQueueItem] = []
-    private var transQueue: [(UUID, String)] = []
 
     private var lastRenderTime: TimeInterval = 0
     private let dynamicIdleFlushSeconds: TimeInterval = 2.0
     private let organizerBufferSeconds: TimeInterval = 1.2
     private let organizerMaxBatchSize = 4
-    private let maxMergedAccentAnalysisPCMBytes = 32000 * 6
     private var lastDynamicInputTime: TimeInterval = 0
     private var liveSummaryCursor = LiveSummaryCursor()
     private var filePath: URL?
     private var isRunning = false
-    private var providerModelConnectivityRecords: [String: LLMProviderModelConnectivityRecord] = [:]
     private var speakerDiarizationTask: Task<Void, Never>?
     private var translationOnlyOrganizationTask: Task<Void, Never>?
     private var lastTranslationOnlyDisplaySignature = ""
@@ -218,15 +225,7 @@ final class TranscriptionViewModel: ObservableObject {
     private var lectureMetricsByItemID: [UUID: LectureSegmentMetrics] = [:]
     private var recordingStartedAt = Date().timeIntervalSince1970
     private var resourcePressureMonitor: ResourcePressureMonitor?
-    private var diagnosticsTask: Task<Void, Never>?
-
-    // Worker handles
-    private var whisperWorkerTask: Task<Void, Never>?
-    private var whisperWorkerTask2: Task<Void, Never>?
-    private var llmWorkerTask: Task<Void, Never>?
     private var organizerWorkerTask: Task<Void, Never>?
-    private var translationWorkerTask1: Task<Void, Never>?
-    private var translationWorkerTask2: Task<Void, Never>?
     private var draftAppleTranslationTask: Task<Void, Never>?
     private var appleRealtimeTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var volumePollTask: Task<Void, Never>?
@@ -274,7 +273,6 @@ final class TranscriptionViewModel: ObservableObject {
             audioCaptureSourceStatus = "已切换为麦克风 + 电脑音频，避免应用捕获授权冲突"
         }
         availableAudioCaptureSources = Self.supportedAudioCaptureSources(selected: selectedAudioCaptureSource)
-        providerModelConnectivityRecords = Self.decodeConnectivityRecords(from: providerModelConnectivityRecordsJSON)
         _ = try? SessionRecoveryJournal.recoverPendingSessions(
             rootDirectory: SessionAudioStore.defaultRootDirectory()
         )
@@ -284,18 +282,18 @@ final class TranscriptionViewModel: ObservableObject {
             }
         }
         resourcePressureMonitor?.start()
-        modelCenterViewModel.configureModelSelection(selectedModels: selectedProviderModelNames) { [weak self] providerID, modelID in
+        let defaults = UserDefaults.standard
+        modelCenterViewModel.configureModelSelection(selectedModels: [
+            .groq: defaults.string(forKey: "groqCoreModelName") ?? LLMProviderCatalog.defaultGroqModelName,
+            .agnes: defaults.string(forKey: "agnesOrganizerModelName") ?? LLMProviderCatalog.defaultAgnesOrganizerModelName
+        ]) { [weak self] providerID, modelID in
             self?.selectProviderModel(modelID, for: providerID)
         }
         initializeMeetingLibrary()
     }
 
     private func selectProviderModel(_ modelID: String, for providerID: LLMProviderID) {
-        switch providerID {
-        case .groq: groqCoreModelName = modelID
-        case .freeLLM: break
-        case .agnes: agnesOrganizerModelName = modelID
-        }
+        guard providerID != .freeLLM else { return }
         noteProviderModelSelectionChanged()
     }
 
@@ -660,15 +658,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     func updateProviderAPIKeys(_ keys: [LLMProviderID: String]) {
-        let previousKeys = providerAPIKeys
-        providerAPIKeys = keys
-        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
-            from: providerAPIKeys,
-            testedResults: providerCheckResults,
-            selectedModelNames: selectedProviderModelNames
-        )
-        if previousKeys != keys {
-            apiReady = false
+        if modelCenterViewModel.updateProviderAPIKeys(keys) {
             translationEnabled = false
             liveSummaryReady = false
             liveSummaryStatus = "API 配置已更改，请重新自检"
@@ -947,27 +937,15 @@ final class TranscriptionViewModel: ObservableObject {
 
             // 6️⃣ Groq 核心 + FreeLLMAPI 总结 + Agnes 整理测试
             setStatus(.checking("测试 Groq、FreeLLMAPI 与 Agnes..."))
-            let groqResult = await llmService.testConnectivity(
-                credential: LLMProviderCatalog.groqCoreCredential(
-                    from: providerAPIKeys,
-                    selectedModelNames: selectedProviderModelNames
-                )
+            let mergedResults = await modelCenterViewModel.testConnectivity(
+                llm: llmService,
+                summary: freeLLMSummaryService,
+                agnes: agnesHistoryOrganizerService,
+                freeLLMBaseURL: freeLLMBaseURL
             )
-            let summaryResult = await freeLLMSummaryService.testConnectivity(
-                credential: LLMProviderCatalog.freeLLMSummaryCredential(
-                    from: providerAPIKeys,
-                    baseURL: freeLLMBaseURL
-                )
-            )
-            let agnesResult = await agnesHistoryOrganizerService.testConnectivity(
-                credential: LLMProviderCatalog.agnesOrganizerCredential(
-                    from: providerAPIKeys,
-                    selectedModelNames: selectedProviderModelNames
-                )
-            )
-            let mergedResults = [groqResult, summaryResult, agnesResult]
-            providerCheckResults = mergedResults
-            recordProviderModelConnectivity(mergedResults)
+            let groqResult = mergedResults.first(where: { $0.provider.id == .groq })!
+            let summaryResult = mergedResults.first(where: { $0.provider.id == .freeLLM })!
+            let agnesResult = mergedResults.first(where: { $0.provider.id == .agnes })!
             applyTranslationReadiness(
                 apiReady: groqResult.passed,
                 appleReady: appleTranslationReady
@@ -1101,12 +1079,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     func noteProviderModelSelectionChanged() {
-        providerCheckResults = LLMProviderCatalog.mergedCheckResults(
-            from: providerAPIKeys,
-            testedResults: [],
-            selectedModelNames: selectedProviderModelNames
-        )
-        apiReady = false
+        modelCenterViewModel.invalidateConnectivity()
         translationEnabled = false
         liveSummaryReady = false
         liveSummaryStatus = "模型已更改，请重新自检"
@@ -1121,55 +1094,6 @@ final class TranscriptionViewModel: ObservableObject {
             whisper: whisperReady,
             providerResults: providerCheckResults
         )
-    }
-
-    private func recordProviderModelConnectivity(_ results: [LLMProviderCheckResult]) {
-        for result in results {
-            let recordStatus: LLMProviderModelConnectivityStatus?
-            let detail: String
-            switch result.status {
-            case .passed:
-                recordStatus = .passed
-                detail = ""
-            case .failed(let reason):
-                recordStatus = .failed
-                detail = reason
-            case .notConfigured:
-                recordStatus = nil
-                detail = ""
-            }
-            guard let recordStatus else { continue }
-
-            let key = LLMProviderCatalog.connectivityKey(
-                providerID: result.provider.id,
-                modelID: result.provider.modelName
-            )
-            providerModelConnectivityRecords[key] = LLMProviderModelConnectivityRecord(
-                providerID: result.provider.id,
-                modelID: result.provider.modelName,
-                status: recordStatus,
-                detail: detail,
-                testedAt: Date()
-            )
-        }
-        persistProviderModelConnectivityRecords()
-    }
-
-    private func persistProviderModelConnectivityRecords() {
-        let records = Array(providerModelConnectivityRecords.values)
-        guard let data = try? JSONEncoder().encode(records),
-              let json = String(data: data, encoding: .utf8) else { return }
-        providerModelConnectivityRecordsJSON = json
-    }
-
-    private static func decodeConnectivityRecords(
-        from json: String
-    ) -> [String: LLMProviderModelConnectivityRecord] {
-        guard let data = json.data(using: .utf8), !data.isEmpty,
-              let records = try? JSONDecoder().decode([LLMProviderModelConnectivityRecord].self, from: data) else {
-            return [:]
-        }
-        return LLMProviderCatalog.connectivityRecordsByKey(records)
     }
 
     // MARK: - 启动/停止
@@ -1197,13 +1121,7 @@ final class TranscriptionViewModel: ObservableObject {
         historyItems = []
         dynamicItems = []
         translationOnlyHistoryBlocks = []
-        whisperQueue = []
-        inFlightWhisperItems = [:]
-        llmFormatQueue = []
-        pendingLLMFormatBatch = []
-        sourceIDsByLLMPrimaryID = [:]
         organizerQueue = []
-        transQueue = []
         liveSummaryText = ""
         liveSummaryStatus = liveSummaryReady ? "等待历史内容" : "未配置"
         isLiveSummaryUpdating = false
@@ -1291,48 +1209,39 @@ final class TranscriptionViewModel: ObservableObject {
                 return
             }
 
-            // 配置 LLM / Translation 回调
-            await llmService.configure { [weak self] uid, text in
-                Task { @MainActor [weak self] in
-                    guard let self, self.isRunning else { return }
-                    self.postProcessResult(uid: uid, finalText: text)
-                }
-            }
-            await translationService.configure(onResult: { [weak self] uid, zhText in
-                Task { @MainActor [weak self] in
-                    guard let self, self.isRunning else { return }
-                    self.applyTranslation(uid: uid, zhText: zhText)
-                }
-            })
-            guard self.isRunning, self.sessionGeneration == generation else {
-                await self.cleanupCancelledStart(generation: generation)
+            guard let pipelineContext = self.sessionContext else {
+                self.handleStartFailure("会话上下文不可用")
                 return
             }
-
-            // 配置 Sherpa segment 回调
-            await sherpaService.startStreaming(
-                onTimedSegment: { [weak self] segment in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.isRunning else { return }
-                        self.timedSegments[segment.id] = (segment.startTime, segment.endTime, segment.text)
-                        guard self.sessionGeneration == generation else { return }
-                        guard let context = self.sessionContext else { return }
-                        Task { try? await self.sessionCoordinator?.upsert(
-                            context: context,
-                            id: segment.id,
-                            startTime: segment.startTime,
-                            endTime: segment.endTime,
-                            draft: segment.text,
-                            refined: segment.text,
-                            speakerID: nil
-                        ) }
-                        self.enqueueWhisperItem(uid: segment.id, pcm: segment.pcmData, sherpaText: segment.text)
+            await livePipeline.start(
+                configuration: LiveTranscriptionPipelineConfiguration(
+                    course: course,
+                    groqCredential: self.groqCoreCredential(),
+                    translationMode: self.translationExecutionMode,
+                    pauseSeconds: self.pauseVal,
+                    hardCutSeconds: self.hardCutVal,
+                    processAudio: { [weak self] chunk in
+                        guard let self, let coordinator = self.sessionCoordinator else {
+                            throw LiveSessionPersistenceError.staleSession
+                        }
+                        return try coordinator.accept(chunk, context: pipelineContext)
+                    },
+                    admitSegment: { [weak self] segment, queue in
+                        self?.admitLiveSegment(segment, queue: queue, generation: generation) ?? .drop
+                    },
+                    recentContext: { [weak self] in
+                        self?.getRecentContext() ?? ""
+                    },
+                    isSessionEnding: { [weak self] in
+                        self?.looksLikeSessionEnding() ?? true
+                    },
+                    speakerDiarizationActive: { [weak self] in
+                        self?.speakerDiarizationTask != nil
                     }
-                },
-                onDraft: { [weak self] text in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.isRunning else { return }
-                        self.updateSherpaDraft(text)
+                ),
+                onEvent: { [weak self] event in
+                    await MainActor.run { [weak self] in
+                        self?.handleLivePipelineEvent(event, generation: generation)
                     }
                 }
             )
@@ -1350,14 +1259,9 @@ final class TranscriptionViewModel: ObservableObject {
                 }
             }
 
-            // 启动各级 Worker
-            startWhisperWorker()
-            startLLMWorker()
             startOrganizerWorker()
-            startTranslationWorkers()
             startVolumePolling()
             startDynamicIdleFlushWorker()
-            startDiagnosticsWorker()
 
             do {
                 if audioInputSelection.systemAudioEnabled {
@@ -1397,35 +1301,36 @@ final class TranscriptionViewModel: ObservableObject {
             canRestart = false
         }
 
-        degradePendingWorkForFinalNote()
-        cancelWorkerTasks()
-
+        cancelWorkerTasks(cancelPipeline: false)
         stopAudioCapture()
         finalizeSessionAudioPipeline()
-        Task {
-            await sherpaService.stopStreaming()
-            await llmService.stop()
-        }
-
-        if wasRecording {
-            for i in 0..<dynamicItems.count { dynamicItems[i].zone = .history }
-            historyItems.append(contentsOf: dynamicItems)
-            _ = applyLocalHistoryCleanup()
-            historyItems.forEach(persistLiveSegment)
-            queueNoteWrite()
-        }
-        dynamicItems = []
-        draftText = ""
-        clearAppleRealtimeTranslations()
         setStatus(.idle)
         statusMessage = wasRecording ? "正在整理详细总结..." : "麦克风已断开"
-        flushPendingLLMFormatBatchIfReady(force: true)
-        if wasRecording {
-            runFinalSpeakerCorrectionThenSummarize(
-                snapshot: sessionAudioStore.finalizeSnapshot()
-            )
-        }
         renderUI(force: true)
+
+        Task { [weak self, livePipeline] in
+            let pending = await livePipeline.finish()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.degradePendingWorkForFinalNote(pending)
+                if wasRecording {
+                    for i in self.dynamicItems.indices { self.dynamicItems[i].zone = .history }
+                    self.historyItems.append(contentsOf: self.dynamicItems)
+                    _ = self.applyLocalHistoryCleanup()
+                    self.historyItems.forEach(self.persistLiveSegment)
+                    self.queueNoteWrite()
+                }
+                self.dynamicItems = []
+                self.draftText = ""
+                self.clearAppleRealtimeTranslations()
+                if wasRecording {
+                    self.runFinalSpeakerCorrectionThenSummarize(
+                        snapshot: self.sessionAudioStore.finalizeSnapshot()
+                    )
+                }
+                self.renderUI(force: true)
+            }
+        }
     }
 
     private func runFinalSpeakerCorrectionThenSummarize(
@@ -1520,8 +1425,6 @@ final class TranscriptionViewModel: ObservableObject {
                 try? self.sessionRecoveryJournal.markCompleted()
                 self.sessionRecoveryJournal.close()
                 self.sessionAudioStore.cleanupCurrentSession()
-                self.diagnosticsTask?.cancel()
-                self.diagnosticsTask = nil
                 self.refreshNoteRecords()
                 self.finalSummaryTask = nil
                 self.isFinalizingSession = false
@@ -1556,12 +1459,6 @@ final class TranscriptionViewModel: ObservableObject {
         sessionContext = nil
         livePersistenceSession = nil
         Task { if let failedContext { await sessionCoordinator?.fail(failedContext) } }
-        diagnosticsTask?.cancel()
-        diagnosticsTask = nil
-        Task {
-            await sherpaService.stopStreaming()
-            await llmService.stop()
-        }
         setStatus(.error(message))
         renderUI(force: true)
     }
@@ -1574,21 +1471,14 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func acceptCapturedAudio(samples: [Float], sampleRate: Int32, source: AudioChunkSource) async {
-        guard isRunning, let coordinator = sessionCoordinator, let context = sessionContext else { return }
+        guard isRunning, sessionContext != nil else { return }
         let elapsed = Self.elapsedSeconds(since: sessionCaptureStartedAt)
-        do {
-            let mixed = try coordinator.accept(AudioChunk(
-                source: source,
-                samples: samples,
-                sampleRate: Int(sampleRate),
-                sessionStartTime: elapsed
-            ), context: context)
-            if !mixed.isEmpty {
-                await sherpaService.acceptWaveform(samples: mixed, sampleRate: 16_000)
-            }
-        } catch {
-            print("[SessionAudioPipeline] \(error.localizedDescription)")
-        }
+        await livePipeline.accept(AudioChunk(
+            source: source,
+            samples: samples,
+            sampleRate: Int(sampleRate),
+            sessionStartTime: elapsed
+        ))
     }
 
     private func finalizeSessionAudioPipeline() {
@@ -1651,13 +1541,8 @@ final class TranscriptionViewModel: ObservableObject {
             .appendingPathComponent("HySimulatranslate/Sessions", isDirectory: true)
     }
 
-    private func cancelWorkerTasks() {
-        whisperWorkerTask?.cancel()
-        whisperWorkerTask2?.cancel()
-        llmWorkerTask?.cancel()
+    private func cancelWorkerTasks(cancelPipeline: Bool = true) {
         organizerWorkerTask?.cancel()
-        translationWorkerTask1?.cancel()
-        translationWorkerTask2?.cancel()
         volumePollTask?.cancel()
         dynamicIdleFlushTask?.cancel()
         summaryTask?.cancel()
@@ -1669,12 +1554,7 @@ final class TranscriptionViewModel: ObservableObject {
             task.cancel()
         }
 
-        whisperWorkerTask = nil
-        whisperWorkerTask2 = nil
-        llmWorkerTask = nil
         organizerWorkerTask = nil
-        translationWorkerTask1 = nil
-        translationWorkerTask2 = nil
         volumePollTask = nil
         dynamicIdleFlushTask = nil
         summaryTask = nil
@@ -1686,6 +1566,9 @@ final class TranscriptionViewModel: ObservableObject {
         isLiveSummaryUpdating = false
         isAgnesOrganizing = false
         pendingAgnesOrganization = false
+        if cancelPipeline {
+            Task { [livePipeline] in await livePipeline.cancel() }
+        }
     }
 
     func prepareRestart() {
@@ -1694,13 +1577,7 @@ final class TranscriptionViewModel: ObservableObject {
         historyItems = []
         dynamicItems = []
         translationOnlyHistoryBlocks = []
-        whisperQueue = []
-        inFlightWhisperItems = [:]
-        llmFormatQueue = []
-        pendingLLMFormatBatch = []
-        sourceIDsByLLMPrimaryID = [:]
         organizerQueue = []
-        transQueue = []
         draftText = ""
         clearAppleRealtimeTranslations()
         liveSummaryText = ""
@@ -1726,13 +1603,7 @@ final class TranscriptionViewModel: ObservableObject {
         historyItems = []
         dynamicItems = []
         translationOnlyHistoryBlocks = []
-        whisperQueue = []
-        inFlightWhisperItems = [:]
-        llmFormatQueue = []
-        pendingLLMFormatBatch = []
-        sourceIDsByLLMPrimaryID = [:]
         organizerQueue = []
-        transQueue = []
         draftText = ""
         clearAppleRealtimeTranslations()
         liveSummaryText = ""
@@ -1870,80 +1741,93 @@ final class TranscriptionViewModel: ObservableObject {
         appleRealtimeTranslations.removeAll()
     }
 
-    private func enqueueWhisperItem(uid: UUID, pcm: Data, sherpaText: String) {
+    private func admitLiveSegment(
+        _ segment: SherpaSegment,
+        queue: LivePipelineQueueSnapshot,
+        generation: UInt64
+    ) -> RefinementAdmission {
+        guard sessionGeneration == generation else { return .drop }
+        timedSegments[segment.id] = (segment.startTime, segment.endTime, segment.text)
+        if let context = sessionContext {
+            Task { [sessionCoordinator, context] in
+                try? await sessionCoordinator?.upsert(
+                    context: context,
+                    id: segment.id,
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    draft: segment.text,
+                    refined: segment.text,
+                    speakerID: nil
+                )
+            }
+        }
         if moveReadyDynamicItemsToHistory(forceLeadingCompleted: true) {
             queueNoteWrite()
-        }
-        let isAccentPlaceholder = WhisperKitService.isAccentAnalysisPlaceholder(sherpaText)
-        if !isAccentPlaceholder,
-           !SmartWhisperRouting.containsLexicalContent(sherpaText) {
-            return
-        }
-        if mergeIntoQueuedAccentAnalysisIfPossible(pcm: pcm, sherpaText: sherpaText) {
-            draftText = ""
-            clearDraftAppleTranslation()
-            renderUI(force: true)
-            return
         }
         noteDynamicInput()
         draftText = ""
         clearDraftAppleTranslation()
 
-        let metrics = LectureSegmentMetrics.make(pcmData: pcm, text: sherpaText)
-        if !isAccentPlaceholder {
+        let metrics = LectureSegmentMetrics.make(pcmData: segment.pcmData, text: segment.text)
+        if !WhisperKitService.isAccentAnalysisPlaceholder(segment.text) {
             let decision = lectureFocusFilter.evaluate(
                 metrics,
                 elapsed: Date().timeIntervalSince1970 - recordingStartedAt
             )
             guard decision != .drop else {
                 renderUI(force: true)
-                return
+                return .drop
             }
         }
-
-        updateRefinementLoadState()
-        switch RefinementBackpressurePolicy.admission(
+        let admission = RefinementBackpressurePolicy.admission(
             for: metrics,
-            state: refinementLoadState,
-            pendingCount: whisperQueue.count,
-            pendingAudioSeconds: pendingWhisperAudioSeconds()
-        ) {
-        case .drop:
-            renderUI(force: true)
-            return
-        case .useSherpa:
-            lectureMetricsByItemID[uid] = metrics
-            recordAcceptedAudioSegment(uid: uid, pcm: pcm, sherpaText: sherpaText)
-            let newItem = TranscriptionItem(
-                id: uid,
-                english: sherpaText,
-                status: .whispering,
-                zone: .dynamic
-            )
-            dynamicItems.append(newItem)
-            requestAppleRealtimeTranslation(uid: uid, sherpaText: sherpaText)
-            enqueueLLMItem(
-                uid: uid,
-                text: sherpaText,
-                sherpaText: sherpaText,
-                taskType: .format
-            )
-            updateRefinementLoadState()
-            return
-        case .refine:
-            lectureMetricsByItemID[uid] = metrics
-            break
+            state: queue.loadState,
+            pendingCount: queue.whisperCount,
+            pendingAudioSeconds: queue.pendingAudioSeconds
+        )
+        if admission != .drop {
+            lectureMetricsByItemID[segment.id] = metrics
+            recordAcceptedAudioSegment(uid: segment.id, pcm: segment.pcmData, sherpaText: segment.text)
         }
+        return admission
+    }
 
-        recordAcceptedAudioSegment(uid: uid, pcm: pcm, sherpaText: sherpaText)
-        let item = WhisperQueueItem(uid: uid, pcmData: pcm, sherpaTextBackup: sherpaText)
-        whisperQueue.append(item)
-        whisperQueueSize = whisperQueue.count
-        updateRefinementLoadState()
-        let newItem = TranscriptionItem(id: uid, english: sherpaText, status: .whispering, zone: .dynamic)
-        dynamicItems.append(newItem)
-        requestAppleRealtimeTranslation(uid: uid, sherpaText: sherpaText)
-        renderUI(force: true)
+    private func handleLivePipelineEvent(_ event: LivePipelineEvent, generation: UInt64) {
+        guard sessionGeneration == generation else { return }
+        switch event {
+        case .draft(let text):
+            guard isRunning else { return }
+            updateSherpaDraft(text)
+        case .segmentAccepted(let segment, let admission):
+            let status: ItemStatus = admission == .useSherpa ? .llmFormatting : .whispering
+            dynamicItems.append(TranscriptionItem(id: segment.id, english: segment.text, status: status, zone: .dynamic))
+            requestAppleRealtimeTranslation(uid: segment.id, sherpaText: segment.text)
+            renderUI(force: true)
+        case .segmentMerged:
+            draftText = ""
+            clearDraftAppleTranslation()
+            renderUI(force: true)
+        case .refined(let id, let text, _):
+            guard let index = dynamicItems.firstIndex(where: { $0.id == id }) else { return }
+            dynamicItems[index].english = text
+            dynamicItems[index].status = .llmFormatting
+            try? sessionRecoveryJournal.recordRefinement(uid: id, english: text)
+            renderUI(force: true)
+        case .formatted(let id, let text, let sourceIDs):
+            postProcessResult(uid: id, finalText: text, sourceIDs: sourceIDs)
+        case .translated(let id, let text):
+            applyTranslation(uid: id, zhText: text)
+        case .dropped(let id):
+            markAsDropped(uid: id)
+        case .status(let queue):
+            whisperQueueSize = queue.whisperCount
+            llmQueueSize = queue.llmCount
+            refinementLoadState = queue.loadState
+        case .diagnostics(let snapshot):
+            diagnosticsLogger.record(snapshot)
+        case .error(let message):
+            print("[LiveTranscriptionPipeline] \(message)")
+        }
     }
 
     private func recordAcceptedAudioSegment(uid: UUID, pcm: Data, sherpaText: String) {
@@ -1951,8 +1835,30 @@ final class TranscriptionViewModel: ObservableObject {
         try? sessionRecoveryJournal.recordSegment(uid: uid, sherpaText: sherpaText)
     }
 
-    func enqueueWhisperItemForTesting(uid: UUID, pcm: Data, sherpaText: String) {
-        enqueueWhisperItem(uid: uid, pcm: pcm, sherpaText: sherpaText)
+    func enqueueWhisperItemForTesting(uid: UUID, pcm: Data, sherpaText: String) async {
+        let queue = await livePipeline.state()
+        let segment = SherpaSegment(id: uid, pcmData: pcm, text: sherpaText, startTime: 0, endTime: 1)
+        let admission = admitLiveSegment(segment, queue: queue, generation: sessionGeneration)
+        guard admission != .drop else { return }
+        if admission == .refine {
+            let merged = await livePipeline.enqueueRefinementForTesting(
+                WhisperQueueItem(uid: uid, pcmData: pcm, sherpaTextBackup: sherpaText)
+            )
+            if merged {
+                handleLivePipelineEvent(.segmentMerged, generation: sessionGeneration)
+                handleLivePipelineEvent(.status(await livePipeline.state()), generation: sessionGeneration)
+                return
+            }
+        } else {
+            await livePipeline.enqueueLLM(
+                id: uid,
+                text: sherpaText,
+                sherpaText: sherpaText,
+                forceBatch: !apiReady
+            )
+        }
+        handleLivePipelineEvent(.segmentAccepted(segment, admission), generation: sessionGeneration)
+        handleLivePipelineEvent(.status(await livePipeline.state()), generation: sessionGeneration)
     }
 
     private func applySpeakerLabels(_ labels: [UUID: String]) {
@@ -2021,42 +1927,23 @@ final class TranscriptionViewModel: ObservableObject {
         refreshTranslationOnlyHistoryBlocks(forceAgnes: true)
     }
 
-    func enqueueLLMFormatCandidateForTesting(uid: UUID, text: String, sherpaText: String = "") {
-        enqueueLLMItem(uid: uid, text: text, sherpaText: sherpaText, taskType: .format)
-    }
-
-    func flushPendingLLMFormatBatchForTesting(force: Bool = true) {
-        flushPendingLLMFormatBatchIfReady(force: force)
-    }
-
-    var queuedLLMItemsForTesting: [LLMQueueItem] {
-        llmFormatQueue
-    }
-
-    private func mergeIntoQueuedAccentAnalysisIfPossible(pcm: Data, sherpaText: String) -> Bool {
-        guard WhisperKitService.isAccentAnalysisPlaceholder(sherpaText),
-              let lastIndex = whisperQueue.indices.last,
-              WhisperKitService.isAccentAnalysisPlaceholder(whisperQueue[lastIndex].sherpaTextBackup),
-              whisperQueue[lastIndex].pcmData.count + pcm.count <= maxMergedAccentAnalysisPCMBytes
-        else { return false }
-
-        whisperQueue[lastIndex].pcmData.append(pcm)
-        whisperQueueSize = whisperQueue.count
-        updateRefinementLoadState()
-        return true
-    }
-
-    private func updateRefinementLoadState() {
-        refinementLoadState = RefinementBackpressurePolicy.loadState(
-            pendingCount: whisperQueue.count,
-            pendingAudioSeconds: pendingWhisperAudioSeconds()
+    func enqueueLLMFormatCandidateForTesting(uid: UUID, text: String, sherpaText: String = "") async {
+        await livePipeline.enqueueLLM(
+            id: uid,
+            text: text,
+            sherpaText: sherpaText,
+            forceBatch: !apiReady
         )
+        handleLivePipelineEvent(.status(await livePipeline.state()), generation: sessionGeneration)
     }
 
-    private func pendingWhisperAudioSeconds() -> TimeInterval {
-        whisperQueue.reduce(0.0) {
-            $0 + Double($1.pcmData.count) / 32_000.0
-        }
+    func flushPendingLLMFormatBatchForTesting(force: Bool = true) async {
+        await livePipeline.flushPendingLLM(force: force)
+        handleLivePipelineEvent(.status(await livePipeline.state()), generation: sessionGeneration)
+    }
+
+    func queuedLLMItemsForTesting() async -> [LLMQueueItem] {
+        await livePipeline.queuedLLMItems()
     }
 
     private func enqueueLLMItem(
@@ -2065,158 +1952,23 @@ final class TranscriptionViewModel: ObservableObject {
         sherpaText: String = "",
         taskType: LLMTaskType
     ) {
-        let item = LLMQueueItem(
-            priority: taskType == .format ? 1 : 2,
-            timestamp: Date().timeIntervalSince1970,
-            taskType: taskType,
-            uid: uid,
-            sourceIDs: [uid],
-            rawText: text,
-            whisperText: text,
-            sherpaText: sherpaText
-        )
         if let idx = dynamicItems.firstIndex(where: { $0.id == uid }) {
             dynamicItems[idx].english = text
             dynamicItems[idx].status = taskType == .format ? .llmFormatting : .llmAggregating
         }
-        if taskType == .format {
-            pendingLLMFormatBatch.append(item)
-            flushPendingLLMFormatBatchIfReady(force: !apiReady)
-        } else {
-            llmFormatQueue.append(item)
+        Task { [livePipeline] in
+            await livePipeline.enqueueLLM(id: uid, text: text, sherpaText: sherpaText, taskType: taskType)
         }
-        llmQueueSize = llmFormatQueue.count + pendingLLMFormatBatch.count
         renderUI(force: true)
     }
 
-    private func flushPendingLLMFormatBatchIfReady(
-        force: Bool,
-        now: TimeInterval = Date().timeIntervalSince1970
-    ) {
-        guard !pendingLLMFormatBatch.isEmpty else { return }
-        let count = pendingLLMFormatBatch.count
-        let age = now - (pendingLLMFormatBatch.first?.timestamp ?? now)
-        let characterCount = pendingLLMFormatBatch.reduce(0) { $0 + $1.rawText.count }
-        guard force || count >= 3 || age >= 4.5 || characterCount >= 700 else { return }
-
-        let batch = pendingLLMFormatBatch
-        pendingLLMFormatBatch.removeAll()
-
-        let primary = batch[0]
-        let sourceIDs = batch.flatMap(\.sourceIDs)
-        let whisperLines = batch.enumerated()
-            .map { "\($0.offset + 1). \($0.element.whisperText)" }
-            .joined(separator: "\n")
-        let sherpaLines = batch.enumerated()
-            .map { "\($0.offset + 1). \($0.element.sherpaText.isEmpty ? $0.element.rawText : $0.element.sherpaText)" }
-            .joined(separator: "\n")
-        let rawBatch = batch.map(\.rawText).joined(separator: "\n")
-
-        sourceIDsByLLMPrimaryID[primary.uid] = sourceIDs
-        llmFormatQueue.append(
-            LLMQueueItem(
-                priority: primary.priority,
-                timestamp: primary.timestamp,
-                taskType: .format,
-                uid: primary.uid,
-                sourceIDs: sourceIDs,
-                rawText: rawBatch,
-                whisperText: whisperLines,
-                sherpaText: sherpaLines
-            )
-        )
-        llmQueueSize = llmFormatQueue.count + pendingLLMFormatBatch.count
-    }
-
     private func enqueueTranslation(uid: UUID, text: String) {
-        transQueue.append((uid, text))
+        Task { [livePipeline] in await livePipeline.enqueueTranslation(id: uid, text: text) }
     }
 
     // MARK: - Workers
 
-    /// 两路云端 Whisper worker；只有明确云端故障才串行调用本地灾备。
-    private func startWhisperWorker() {
-        whisperWorkerTask = makeWhisperWorkerTask()
-        whisperWorkerTask2 = makeWhisperWorkerTask()
-    }
-
-    private func makeWhisperWorkerTask() -> Task<Void, Never> {
-        Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                let item: WhisperQueueItem? = await MainActor.run {
-                    guard !self.whisperQueue.isEmpty else { return nil }
-                    let i = self.whisperQueue.removeFirst()
-                    self.inFlightWhisperItems[i.uid] = i
-                    self.whisperQueueSize = self.whisperQueue.count
-                    self.updateRefinementLoadState()
-                    return i
-                }
-                guard let item else { try? await Task.sleep(nanoseconds: 100_000_000); continue }
-
-                let uid = item.uid
-                let pcm = item.pcmData
-                let sherpaBackup = item.sherpaTextBackup
-                var finalText = sherpaBackup
-
-                if pcm.count >= 16000 {
-                    let groqKey = await MainActor.run { self.groqAPIKey() }
-                    let cloudText = groqKey.hasPrefix("gsk_")
-                        ? await groqWhisperAPI(pcmData: pcm, apiKey: groqKey)
-                        : nil
-                    let cloudFailed = !groqKey.hasPrefix("gsk_") || cloudText == nil
-
-                    if SmartWhisperRouting.shouldUseLocalFallback(
-                        cloudText: cloudText,
-                        cloudRequestFailed: cloudFailed
-                    ) {
-                        await MainActor.run {
-                            self.refinementLoadState = .localFallback
-                        }
-                        let localText = await self.whisperKitService.transcribe(pcmData: pcm)
-                        finalText = self.isUsableWhisperText(localText, sherpaBackup: sherpaBackup)
-                            ? (localText ?? sherpaBackup)
-                            : sherpaBackup
-                        await MainActor.run {
-                            self.updateRefinementLoadState()
-                        }
-                    } else if let cloudText {
-                        finalText = cloudText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                }
-
-                let isSessionEnding = await MainActor.run {
-                    self.looksLikeSessionEnding()
-                }
-                guard !Task.isCancelled else { return }
-                if self.whisperKitService.shouldDropASRSegment(finalText, isSessionEnding: isSessionEnding) {
-                    await MainActor.run {
-                        self.inFlightWhisperItems.removeValue(forKey: uid)
-                        self.markAsDropped(uid: uid)
-                    }
-                } else {
-                    await MainActor.run {
-                        self.inFlightWhisperItems.removeValue(forKey: uid)
-                        try? self.sessionRecoveryJournal.recordRefinement(
-                            uid: uid,
-                            english: finalText
-                        )
-                        self.enqueueLLMItem(
-                            uid: uid,
-                            text: finalText,
-                            sherpaText: sherpaBackup,
-                            taskType: .format
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    private func degradePendingWorkForFinalNote() {
-        let pendingItems = whisperQueue + Array(inFlightWhisperItems.values)
-        whisperQueue.removeAll()
-        inFlightWhisperItems.removeAll()
+    private func degradePendingWorkForFinalNote(_ pendingItems: [WhisperQueueItem]) {
         whisperQueueSize = 0
 
         let now = Date().timeIntervalSince1970
@@ -2254,53 +2006,9 @@ final class TranscriptionViewModel: ObservableObject {
             }
         }
 
-        llmFormatQueue.removeAll()
-        pendingLLMFormatBatch.removeAll()
-        sourceIDsByLLMPrimaryID.removeAll()
         organizerQueue.removeAll()
-        transQueue.removeAll()
         llmQueueSize = 0
         refinementLoadState = .normal
-    }
-
-    private func isUsableWhisperText(_ text: String?, sherpaBackup: String) -> Bool {
-        let wr = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wr.isEmpty else { return false }
-        if whisperKitService.isHallucination(wr) { return false }
-        if whisperKitService.hasRepeatedPhrase(wr) { return false }
-        let lenRatio = Double(wr.count) / Double(max(1, sherpaBackup.count))
-        if lenRatio < 0.4 || lenRatio > 2.5 { return false }
-        return true
-    }
-
-    private func startLLMWorker() {
-        llmWorkerTask = Task { [weak self] in
-            guard let self else { return }
-            await self.llmService.start()
-            while !Task.isCancelled {
-                let item: LLMQueueItem? = await MainActor.run {
-                    self.flushPendingLLMFormatBatchIfReady(force: false)
-                    guard !self.llmFormatQueue.isEmpty else { return nil }
-                    self.llmFormatQueue.sort {
-                        $0.priority != $1.priority ? $0.priority < $1.priority : $0.timestamp < $1.timestamp
-                    }
-                    let i = self.llmFormatQueue.removeFirst()
-                    self.llmQueueSize = self.llmFormatQueue.count + self.pendingLLMFormatBatch.count
-                    return i
-                }
-                guard let item, let course = self.currentCourse else {
-                    try? await Task.sleep(nanoseconds: 100_000_000); continue
-                }
-                let ctx = self.getRecentContext()
-                let credential = await MainActor.run { self.groqCoreCredential() }
-                await self.llmService.processItem(
-                    item,
-                    groqCredential: credential,
-                    course: course,
-                    recentContext: ctx
-                )
-            }
-        }
     }
 
     private func startOrganizerWorker() {
@@ -2424,28 +2132,6 @@ final class TranscriptionViewModel: ObservableObject {
         }
     }
 
-    private func startTranslationWorkers() {
-        func worker(_ s: TranscriptionViewModel) async {
-            while !Task.isCancelled {
-                let pair: (UUID, String)? = await MainActor.run {
-                    guard !s.transQueue.isEmpty else { return nil }
-                    return s.transQueue.removeFirst()
-                }
-                guard let (uid, text) = pair else { try? await Task.sleep(nanoseconds: 100_000_000); continue }
-                let credential = await MainActor.run { s.groqCoreCredential() }
-                let mode = await MainActor.run { s.translationExecutionMode }
-                await s.translationService.translate(
-                    uid: uid,
-                    englishText: text,
-                    groqCredential: credential,
-                    mode: mode
-                )
-            }
-        }
-        translationWorkerTask1 = Task { [weak self] in guard let self else { return }; await worker(self) }
-        translationWorkerTask2 = Task { [weak self] in guard let self else { return }; await worker(self) }
-    }
-
     private func startVolumePolling() {
         volumePollTask = Task { [weak self] in
             guard let self else { return }
@@ -2469,44 +2155,20 @@ final class TranscriptionViewModel: ObservableObject {
         }
     }
 
-    private func startDiagnosticsWorker() {
-        diagnosticsTask?.cancel()
-        diagnosticsTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                let snapshot = await MainActor.run {
-                    PipelineDiagnosticsSnapshot(
-                        timestamp: Date().timeIntervalSince1970,
-                        whisperQueue: self.whisperQueueSize,
-                        llmQueue: self.llmQueueSize,
-                        pendingPCMBytes: self.pendingWhisperPCMBytes(),
-                        loadState: self.refinementLoadState,
-                        speakerDiarizationActive: self.speakerDiarizationTask != nil,
-                        residentMemoryBytes: PipelineDiagnosticsLogger.residentMemoryBytes()
-                    )
-                }
-                self.diagnosticsLogger.record(snapshot)
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-            }
-        }
-    }
-
-    private func pendingWhisperPCMBytes() -> Int {
-        whisperQueue.reduce(0) { $0 + $1.pcmData.count } +
-        inFlightWhisperItems.values.reduce(0) { $0 + $1.pcmData.count }
-    }
-
     private func handleResourcePressure(_ level: ResourcePressureLevel) {
         guard ResourcePressurePolicy.action(for: level) == .shedHeavyWork else { return }
 
         speakerDiarizationTask?.cancel()
         if isRecording {
-            whisperWorkerTask?.cancel()
-            whisperWorkerTask2?.cancel()
-            degradePendingWorkForFinalNote()
-            refinementLoadState = .protecting
-            queueNoteWrite()
-            startWhisperWorker()
+            Task { [weak self, livePipeline] in
+                let pending = await livePipeline.shedRefinementWork()
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.degradePendingWorkForFinalNote(pending)
+                    self.refinementLoadState = .protecting
+                    self.queueNoteWrite()
+                }
+            }
         }
         Task { [speakerDiarizationService, whisperKitService] in
             await speakerDiarizationService.unloadModels()
@@ -2516,8 +2178,8 @@ final class TranscriptionViewModel: ObservableObject {
 
     // MARK: - 结果处理
 
-    func postProcessResult(uid: UUID, finalText: String) {
-        let consumedSourceIDs = sourceIDsByLLMPrimaryID.removeValue(forKey: uid) ?? [uid]
+    func postProcessResult(uid: UUID, finalText: String, sourceIDs: [UUID]? = nil) {
+        let consumedSourceIDs = sourceIDs ?? [uid]
         for sourceID in consumedSourceIDs where sourceID != uid {
             hideOrganizerItem(uid: sourceID)
         }
@@ -3280,7 +2942,7 @@ final class TranscriptionViewModel: ObservableObject {
 
 // MARK: - Groq Whisper API Helper
 
-private func groqWhisperAPI(pcmData: Data, apiKey: String) async -> String? {
+func groqWhisperAPI(pcmData: Data, apiKey: String) async -> String? {
     // int16 PCM → WAV
     var wav = Data()
     var sampleRate: UInt32 = 16_000
