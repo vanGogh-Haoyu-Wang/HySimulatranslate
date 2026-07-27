@@ -8,7 +8,7 @@ enum SelfCheckScope: Equatable {
 }
 
 // MARK: - 🎙️ 主力同传引擎 ViewModel（对应 Python WhisperTranscriptionApp）
-// Sherpa-onnx 实时流式 + WhisperKit 本地精校 + Groq LLM 格式化 + FreeLLMAPI 中文总结
+// Sherpa-onnx 实时流式 + WhisperKit 本地精校 + Groq LLM 格式化 + OmniRoute 中文总结
 
 @MainActor
 final class TranscriptionViewModel: ObservableObject {
@@ -95,7 +95,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
     @AppStorage("noteDirectoryPath") var noteDirectoryPath: String = ""
     @AppStorage("noteFileFormat") var noteFileFormatRaw: String = NoteFileFormat.markdown.rawValue
-    @AppStorage("freeLLMBaseURL") var freeLLMBaseURL: String = LLMProviderCatalog.defaultFreeLLMBaseURL
+    @AppStorage("omniRouteBaseURL") var omniRouteBaseURL: String = LLMProviderCatalog.defaultOmniRouteBaseURL
     @AppStorage("historyDisplayMode") var historyDisplayModeRaw: String = HistoryDisplayMode.defaultMode.rawValue
     @AppStorage("audioInputSelection") private var audioInputSelectionStorage: String = AudioInputSelection.defaultSelectionStorageValue
     @AppStorage("audioCaptureSource") private var audioCaptureSourceStorage: String = AudioCaptureSource.microphoneStorageValue
@@ -179,7 +179,7 @@ final class TranscriptionViewModel: ObservableObject {
     private let llmService = LLMService()
     private let appleTranslationService: any AppleSystemTranslating
     private let translationService: TranslationService
-    private let freeLLMSummaryService = FreeLLMSummaryService()
+    private let omniRouteSummaryService = OmniRouteSummaryService()
     private let agnesHistoryOrganizerService = AgnesHistoryOrganizerService()
     private let speakerDiarizationService = SpeakerDiarizationService()
     private let sessionAudioStore = SessionAudioStore()
@@ -293,7 +293,7 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func selectProviderModel(_ modelID: String, for providerID: LLMProviderID) {
-        guard providerID != .freeLLM else { return }
+        guard providerID != .omniRoute else { return }
         noteProviderModelSelectionChanged()
     }
 
@@ -935,16 +935,16 @@ final class TranscriptionViewModel: ObservableObject {
             setStatus(.checking("检查 Apple 系统翻译..."))
             appleTranslationReady = await appleTranslationService.prepare()
 
-            // 6️⃣ Groq 核心 + FreeLLMAPI 总结 + Agnes 整理测试
-            setStatus(.checking("测试 Groq、FreeLLMAPI 与 Agnes..."))
+            // 6️⃣ Groq 核心 + OmniRoute 总结 + Agnes 整理测试
+            setStatus(.checking("测试 Groq、OmniRoute 与 Agnes..."))
             let mergedResults = await modelCenterViewModel.testConnectivity(
                 llm: llmService,
-                summary: freeLLMSummaryService,
+                summary: omniRouteSummaryService,
                 agnes: agnesHistoryOrganizerService,
-                freeLLMBaseURL: freeLLMBaseURL
+                omniRouteBaseURL: omniRouteBaseURL
             )
             let groqResult = mergedResults.first(where: { $0.provider.id == .groq })!
-            let summaryResult = mergedResults.first(where: { $0.provider.id == .freeLLM })!
+            let summaryResult = mergedResults.first(where: { $0.provider.id == .omniRoute })!
             let agnesResult = mergedResults.first(where: { $0.provider.id == .agnes })!
             applyTranslationReadiness(
                 apiReady: groqResult.passed,
@@ -952,7 +952,7 @@ final class TranscriptionViewModel: ObservableObject {
             )
             liveSummaryReady = summaryResult.passed
             liveSummaryStatus = liveSummaryReady ? "等待历史内容" : summaryResult.status.displayText
-            print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), FreeLLMAPI summary: \(summaryResult.status.displayText), Agnes organizer: \(agnesResult.status.displayText)")
+            print("[TranscriptionViewModel] Groq core: \(groqResult.status.displayText), OmniRoute summary: \(summaryResult.status.displayText), Agnes organizer: \(agnesResult.status.displayText)")
 
             publishSelfCheckSummary(
                 microphone: microphoneReady,
@@ -974,7 +974,7 @@ final class TranscriptionViewModel: ObservableObject {
             fullSelfCheckRequired = false
             audioInputCheckRequired = false
             let mode = translationExecutionMode.statusTitle
-            let summarySuffix = liveSummaryReady ? "，FreeLLMAPI 总结可用" : ""
+            let summarySuffix = liveSummaryReady ? "，OmniRoute 总结可用" : ""
             setStatus(apiReady
                 ? .ready("✅ 自检通过：\(course.name) \(mode)\(summarySuffix)")
                 : .ready("🟡 API 未连通：\(course.name) \(mode)"))
@@ -1026,7 +1026,7 @@ final class TranscriptionViewModel: ObservableObject {
             }
 
             let mode = translationExecutionMode.statusTitle
-            let summarySuffix = liveSummaryReady ? "，FreeLLMAPI 总结可用" : ""
+            let summarySuffix = liveSummaryReady ? "，OmniRoute 总结可用" : ""
             setStatus(apiReady
                 ? .ready("✅ 音频输入已通过：\(course.name) \(mode)\(summarySuffix)")
                 : .ready("🟡 音频输入已通过：\(course.name) \(mode)"))
@@ -1364,9 +1364,9 @@ final class TranscriptionViewModel: ObservableObject {
     }
 
     private func startFinalSessionSummaryAndWriteNotes() {
-        let credential = LLMProviderCatalog.freeLLMSummaryCredential(
+        let credential = LLMProviderCatalog.omniRouteSummaryCredential(
             from: providerAPIKeys,
-            baseURL: freeLLMBaseURL
+            baseURL: omniRouteBaseURL
         )
         let previousSummary = liveSummaryText
         let fullContent = liveSummarySourceUnits(includeUntranslated: true)
@@ -1374,7 +1374,7 @@ final class TranscriptionViewModel: ObservableObject {
             .joined(separator: "\n\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldRequestDetailedSummary = liveSummaryReady && credential != nil && !fullContent.isEmpty
-        let summaryService = freeLLMSummaryService
+        let summaryService = omniRouteSummaryService
         let template = summaryWorkspace?.selectedTemplate
         let persistenceSession = livePersistenceSession
         let summaryWorkspace = summaryWorkspace
@@ -2741,9 +2741,9 @@ final class TranscriptionViewModel: ObservableObject {
         guard liveSummaryReady,
               !isFinalizingSession,
               !isLiveSummaryUpdating,
-              let credential = LLMProviderCatalog.freeLLMSummaryCredential(
+              let credential = LLMProviderCatalog.omniRouteSummaryCredential(
                 from: providerAPIKeys,
-                baseURL: freeLLMBaseURL
+                baseURL: omniRouteBaseURL
               )
         else { return }
 
@@ -2758,7 +2758,7 @@ final class TranscriptionViewModel: ObservableObject {
 
         let previousSummary = liveSummaryText
         let countAtRequest = units.count
-        let summaryService = freeLLMSummaryService
+        let summaryService = omniRouteSummaryService
         guard let template = summaryWorkspace?.selectedTemplate else { return }
         guard let persistenceSession = livePersistenceSession, let summaryWorkspace else { return }
         isLiveSummaryUpdating = true

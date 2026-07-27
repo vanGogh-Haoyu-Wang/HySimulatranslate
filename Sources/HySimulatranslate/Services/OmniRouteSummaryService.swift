@@ -1,6 +1,6 @@
 import Foundation
 
-enum FreeLLMSummaryError: LocalizedError, Equatable {
+enum OmniRouteSummaryError: LocalizedError, Equatable {
     case http(Int, String)
     case invalidResponse
     case invalidContent
@@ -8,15 +8,15 @@ enum FreeLLMSummaryError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .http(let status, let detail): return "FreeLLMAPI HTTP \(status)：\(detail)"
-        case .invalidResponse: return "FreeLLMAPI 响应格式无效"
-        case .invalidContent: return "FreeLLMAPI 未返回有效摘要"
-        case .network(let detail): return "FreeLLMAPI 网络异常：\(detail)"
+        case .http(let status, let detail): return "OmniRoute HTTP \(status)：\(detail)"
+        case .invalidResponse: return "OmniRoute 响应格式无效"
+        case .invalidContent: return "OmniRoute 未返回有效摘要"
+        case .network(let detail): return "OmniRoute 网络异常：\(detail)"
         }
     }
 }
 
-actor FreeLLMSummaryService {
+actor OmniRouteSummaryService {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -46,7 +46,7 @@ actor FreeLLMSummaryService {
     }
 
     func testConnectivity(credential: LLMProviderCredential?) async -> LLMProviderCheckResult {
-        let provider = credential?.provider ?? LLMProviderCatalog.freeLLMSummaryProvider()!
+        let provider = credential?.provider ?? LLMProviderCatalog.omniRouteSummaryProvider()!
         guard let credential else {
             return LLMProviderCheckResult(provider: provider, status: .notConfigured)
         }
@@ -129,7 +129,7 @@ actor FreeLLMSummaryService {
     private func normalizedSummary(from result: ChatCompletionResult) throws -> String {
         switch result {
         case .success(let content):
-            guard let normalized = Self.normalizedSummaryContent(content) else { throw FreeLLMSummaryError.invalidContent }
+            guard let normalized = Self.normalizedSummaryContent(content) else { throw OmniRouteSummaryError.invalidContent }
             return normalized
         case .failure(let error):
             throw error
@@ -158,7 +158,7 @@ actor FreeLLMSummaryService {
 
     private enum ChatCompletionResult {
         case success(String)
-        case failure(FreeLLMSummaryError)
+        case failure(OmniRouteSummaryError)
     }
 
     private func requestChatCompletion(
@@ -211,7 +211,8 @@ actor FreeLLMSummaryService {
                 ["role": "user", "content": prompt]
             ],
             "temperature": 0.1,
-            "max_tokens": maxTokens
+            "max_tokens": maxTokens,
+            "stream": false
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return request

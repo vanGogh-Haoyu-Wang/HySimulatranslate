@@ -16,7 +16,7 @@
 - **LLM 文本格式化** — Groq API（llama-3.3-70b-versatile）智能修复标点、ASR 错误、句子拼接
 - **中英同传** — 在线时保留分学科强化翻译；完全断网时由 Apple 翻译 Whisper 精校后的正式句子
 - **强化专项** — 自定义学科关键词与会议 focus，提升专业术语识别准确率
-- **实时总结** — 私有 FreeLLMAPI 路由器使用 `auto` 模型逐段生成中文会议总结
+- **实时总结** — OmniRoute 使用 `auto` 模型逐段生成中文会议总结
 - **会话笔记** — 自动将转写+翻译+总结写入桌面 Markdown 笔记文件
 - **毛玻璃 UI** — 原生 SwiftUI 毛玻璃（glass-morphism）界面，支持深色/浅色/跟随系统
 
@@ -45,7 +45,7 @@ Groq LLM 格式化 / 合并 ──→ 纠错、去重、分句
 断网：Apple 翻译 Whisper 精校句（英→简中）
   │
   ▼
-FreeLLMAPI 实时总结 ──→ 中文摘要
+OmniRoute 实时总结 ──→ 中文摘要
   │
   ▼
 写入桌面笔记文件 + Markdown 落盘
@@ -60,7 +60,7 @@ FreeLLMAPI 实时总结 ──→ 中文摘要
 | **操作系统** | macOS 14.0 (Sonoma) 或更高 |
 | **架构** | Apple Silicon (arm64)；当前 Sherpa 运行库不支持 Intel |
 | **麦克风** | 系统麦克风权限 |
-| **网络** | Groq 翻译、FreeLLMAPI 总结和 Agnes 整理需要网络；断网时可使用本地转录与 Apple 翻译 |
+| **网络** | Groq 翻译、OmniRoute 总结和 Agnes 整理需要网络；断网时可使用本地转录与 Apple 翻译 |
 | **Apple 翻译** | 蹦字区实时译文与断网正式翻译需 macOS 26.0+，并通过自检确认系统语言模型可用 |
 | **存储** | ~3 GB（sherpa-onnx 模型 + WhisperKit large-v3 模型 + VAD 模型） |
 
@@ -176,13 +176,13 @@ bash script/package_dmg.sh --verify
 | **左侧记录区** | 扫描笔记目录 `.txt` 文件，可新建记录、进入强化专项、打开设置 |
 | **中右主框** | 共享状态标题栏、当前会话历史墙、强化专项编辑、右侧笔记总结区 |
 | **底部蹦字区** | 横贯中右主框，显示实时 Sherpa 英文与 Apple 临时译文、VAD/Whisper 候选文本、开始/停止按钮 |
-| **右侧总结区** | 默认显示 FreeLLMAPI 实时会议总结；打开左侧历史笔记时由笔记预览覆盖，关闭后恢复总结 |
+| **右侧总结区** | 默认显示 OmniRoute 实时会议总结；打开左侧历史笔记时由笔记预览覆盖，关闭后恢复总结 |
 
 ### 设置项
 
 - **停顿时间** (0.2s–1.5s) — 控制 sherpa-onnx 的语音分段灵敏度
 - **Whisper 精校** — 固定智能混合策略：云端优先，本地 large-v3 只在云端明确失败时单路灾备
-- **模型** — 在同传页设置中选择 Groq 核心模型；总结固定使用 FreeLLMAPI `auto` 路由，避免客户端绑定单一上游模型
+- **模型** — 在同传页设置中填写 OmniRoute Base URL 与 API Key；总结固定使用 `auto` 路由，避免客户端绑定单一上游模型
 - **笔记位置** — 默认桌面，可改为任意本地文件夹
 - **外观** — 跟随系统 / 深色 / 浅色
 
@@ -239,7 +239,7 @@ HySimulatranslate/
 │           ├── LLMService.swift         # Groq LLM 格式化
 │           ├── TranslationService.swift # 翻译服务
 │           ├── AppleSystemTranslationService.swift # Apple 系统翻译会话
-│           ├── FreeLLMSummaryService.swift # FreeLLMAPI 总结
+│           ├── OmniRouteSummaryService.swift # OmniRoute 总结
 │           └── KeychainManager.swift    # API Key 钥匙串管理
 ├── Tests/
 │   └── HySimulatranslateTests/
@@ -260,7 +260,7 @@ HySimulatranslate/
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 实时流式语音识别 |
 | [WhisperKit](https://github.com/argmaxinc/WhisperKit) | 本地 Whisper large-v3 精校 |
 | [Groq API](https://groq.com/) | LLM 文本格式化 + 翻译 |
-| FreeLLMAPI（私有 Tailscale 服务） | 中文会议总结与上游故障切换 |
+| OmniRoute（本地或自托管） | 中文会议总结与上游故障切换 |
 | Apple Translation framework | Sherpa 临时译文与断网正式翻译 |
 | SwiftUI + AppKit | macOS 原生 UI |
 | AVFoundation / ScreenCaptureKit | 麦克风与电脑音频采集 |
@@ -283,7 +283,7 @@ Powered by **Haoyu Wang**
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — 下一代 Kaldi 实时语音识别
 - [WhisperKit](https://github.com/argmaxinc/WhisperKit) — 苹果生态本地 Whisper 推理
 - [swift-transformers](https://github.com/huggingface/swift-transformers) — Hugging Face 模型 Swift 运行时
-- Groq Cloud & FreeLLMAPI — 云端翻译与私有路由
+- Groq Cloud & OmniRoute — 云端翻译与自托管路由
 
 ---
 

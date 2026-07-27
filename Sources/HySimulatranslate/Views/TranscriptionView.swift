@@ -780,7 +780,7 @@ struct TranscriptionView: View {
                     liveSummary: vm.liveSummaryText,
                     liveStatus: vm.liveSummaryStatus,
                     isUpdating: vm.isLiveSummaryUpdating,
-                    modelName: LLMProviderCatalog.defaultFreeLLMSummaryModelName
+                    modelName: LLMProviderCatalog.defaultOmniRouteSummaryModelName
                 )
             } else {
                 legacySummaryEnvironmentPanel
@@ -794,7 +794,7 @@ struct TranscriptionView: View {
                 Text("笔记总结区")
                     .font(centerWallFont(weight: .semibold))
                     .foregroundStyle(.secondary)
-                providerModelBadge(prefix: "FreeLLMAPI", modelName: LLMProviderCatalog.defaultFreeLLMSummaryModelName)
+                providerModelBadge(prefix: "OmniRoute", modelName: LLMProviderCatalog.defaultOmniRouteSummaryModelName)
                 Spacer()
                 if vm.isLiveSummaryUpdating {
                     ProgressView()
@@ -1086,22 +1086,16 @@ struct TranscriptionView: View {
             if let groq = LLMProviderCatalog.groqCoreProvider {
                 providerKeyRow(groq, title: "Groq 核心")
             }
-            if let freeLLM = LLMProviderCatalog.freeLLMSummaryProvider(baseURL: vm.freeLLMBaseURL) {
-                providerKeyRow(freeLLM, title: "FreeLLMAPI 总结")
-            }
-            TextField("FreeLLMAPI Base URL", text: $vm.freeLLMBaseURL)
-                .font(centerWallFont())
-                .textFieldStyle(.roundedBorder)
-            if LLMProviderCatalog.freeLLMSummaryProvider(baseURL: vm.freeLLMBaseURL) == nil {
-                Text("请输入以 http:// 或 https:// 开头的有效地址")
-                    .font(centerWallFont())
-                    .foregroundStyle(.red)
-            }
+            providerKeyRow(
+                LLMProviderCatalog.omniRouteSummaryProvider(baseURL: vm.omniRouteBaseURL)
+                    ?? LLMProviderCatalog.provider(for: .omniRoute)!,
+                title: "OmniRoute 总结"
+            )
             if let agnes = LLMProviderCatalog.agnesOrganizerProvider {
                 providerKeyRow(agnes, title: "Agnes 整理", showsStatus: true)
             }
             GroupBox("数据处理说明") {
-                Text("音频转写和说话人识别默认在本机完成。启用云功能后，Groq 接收待翻译文本，FreeLLMAPI 接收总结文本，Agnes 仅在启用整理时接收文本。")
+                Text("音频转写和说话人识别默认在本机完成。启用云功能后，Groq 接收待翻译文本，OmniRoute 接收总结文本，Agnes 仅在启用整理时接收文本。")
                     .font(centerWallFont())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1123,6 +1117,17 @@ struct TranscriptionView: View {
                 Spacer()
                 Link("获取", destination: provider.getAPIKeyURL)
                     .font(centerWallFont(weight: .semibold))
+            }
+
+            if provider.id == .omniRoute {
+                TextField("OmniRoute Base URL", text: $vm.omniRouteBaseURL)
+                    .font(centerWallFont())
+                    .textFieldStyle(.roundedBorder)
+                if LLMProviderCatalog.omniRouteSummaryProvider(baseURL: vm.omniRouteBaseURL) == nil {
+                    Text("请输入以 http:// 或 https:// 开头的有效地址")
+                        .font(centerWallFont())
+                        .foregroundStyle(.red)
+                }
             }
 
             SecureField(provider.keyPlaceholder, text: apiKeyBinding(for: provider.id))

@@ -109,7 +109,7 @@ struct ModelCenterView: View {
     }
 
     private func providerTitle(_ id: LLMProviderID) -> String {
-        switch id { case .groq: "Groq 核心"; case .freeLLM: "FreeLLMAPI 总结"; case .agnes: "Agnes 整理" }
+        switch id { case .groq: "Groq 核心"; case .omniRoute: "OmniRoute 总结"; case .agnes: "Agnes 整理" }
     }
     private func stateLabel(_ state: ModelResourceState) -> String {
         switch state { case .missing: "未安装"; case .corrupt: "已损坏"; case .ready: "已就绪" }

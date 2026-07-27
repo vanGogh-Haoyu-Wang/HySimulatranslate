@@ -61,6 +61,11 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+  </dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>HySimulatranslate needs microphone access to record your local speech during interpretation.</string>
   <key>NSScreenCaptureUsageDescription</key>

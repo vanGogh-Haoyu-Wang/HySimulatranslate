@@ -106,13 +106,13 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
     }
     func testConnectivity(
         llm: LLMService,
-        summary: FreeLLMSummaryService,
+        summary: OmniRouteSummaryService,
         agnes: AgnesHistoryOrganizerService,
-        freeLLMBaseURL: String
+        omniRouteBaseURL: String
     ) async -> [LLMProviderCheckResult] {
         let results = [
             await llm.testConnectivity(credential: LLMProviderCatalog.groqCoreCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames)),
-            await summary.testConnectivity(credential: LLMProviderCatalog.freeLLMSummaryCredential(from: providerAPIKeys, baseURL: freeLLMBaseURL)),
+            await summary.testConnectivity(credential: LLMProviderCatalog.omniRouteSummaryCredential(from: providerAPIKeys, baseURL: omniRouteBaseURL)),
             await agnes.testConnectivity(credential: LLMProviderCatalog.agnesOrganizerCredential(from: providerAPIKeys, selectedModelNames: selectedProviderModelNames))
         ]
         setProviderCheckResults(results)
@@ -229,7 +229,7 @@ struct ModelDeletionRequest: Equatable, Sendable { let resourceID: String; let d
         switch providerID {
         case .groq: "groqCoreModelName"
         case .agnes: "agnesOrganizerModelName"
-        case .freeLLM: nil
+        case .omniRoute: nil
         }
     }
 }

@@ -21,7 +21,7 @@ private final class SummaryURLProtocolStub: URLProtocol {
 }
 
 final class SafetyRegressionTests: XCTestCase {
-    func testFreeLLMSummaryUsesBearerAutoAndOpenAIResponseShape() async throws {
+    func testOmniRouteSummaryUsesBearerAutoAndOpenAIResponseShape() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SummaryURLProtocolStub.self]
         SummaryURLProtocolStub.handler = { request in
@@ -30,13 +30,14 @@ final class SafetyRegressionTests: XCTestCase {
             let response = try XCTUnwrap(HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil))
             return (response, Data(#"{"choices":[{"message":{"content":"有效摘要"}}]}"#.utf8))
         }
-        let provider = try XCTUnwrap(LLMProviderCatalog.freeLLMSummaryProvider(baseURL: "https://router.example/"))
+        let provider = try XCTUnwrap(LLMProviderCatalog.omniRouteSummaryProvider(baseURL: "https://router.example/v1"))
         let credential = LLMProviderCredential(provider: provider, apiKey: "secret")
-        let request = FreeLLMSummaryService.makeRequest(credential: credential, prompt: "content", maxTokens: 20, timeout: 1)
+        let request = OmniRouteSummaryService.makeRequest(credential: credential, prompt: "content", maxTokens: 20, timeout: 1)
         let body = try XCTUnwrap(request.httpBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(json["model"] as? String, "auto")
-        let service = FreeLLMSummaryService(session: URLSession(configuration: configuration))
+        XCTAssertEqual(json["stream"] as? Bool, false)
+        let service = OmniRouteSummaryService(session: URLSession(configuration: configuration))
         let summary = try await service.summarize(
             prompt: "content",
             credential: credential,
@@ -45,9 +46,9 @@ final class SafetyRegressionTests: XCTestCase {
         XCTAssertEqual(summary, "有效摘要")
     }
 
-    func testFreeLLMErrorMessageParsesAuthenticationFailure() {
+    func testOmniRouteErrorMessageParsesAuthenticationFailure() {
         let data = Data(#"{"error":{"message":"Invalid API key","type":"authentication_error"}}"#.utf8)
-        XCTAssertEqual(FreeLLMSummaryService.errorMessage(from: data), "Invalid API key")
+        XCTAssertEqual(OmniRouteSummaryService.errorMessage(from: data), "Invalid API key")
     }
 
     func testSameLanguageTranslationDoesNotCallACloudProvider() async {

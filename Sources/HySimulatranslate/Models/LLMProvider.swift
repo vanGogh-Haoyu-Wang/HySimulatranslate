@@ -2,7 +2,7 @@ import Foundation
 
 enum LLMProviderID: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
     case groq
-    case freeLLM
+    case omniRoute
     case agnes
 
     var id: String { rawValue }
@@ -119,8 +119,8 @@ struct LLMProviderCheckResult: Equatable, Sendable {
 
 enum LLMProviderCatalog {
     static let defaultGroqModelName = "llama-3.3-70b-versatile"
-    static let defaultFreeLLMSummaryModelName = "auto"
-    static let defaultFreeLLMBaseURL = "http://100.76.88.120:3001"
+    static let defaultOmniRouteSummaryModelName = "auto"
+    static let defaultOmniRouteBaseURL = "http://localhost:20128/v1"
     static let defaultAgnesOrganizerModelName = "agnes-2.0-flash"
     static let modelCenterProviderIDs: [LLMProviderID] = [.groq, .agnes]
 
@@ -138,14 +138,14 @@ enum LLMProviderCatalog {
             timeout: 4.0
         ),
         LLMProvider(
-            id: .freeLLM,
-            displayName: "FreeLLMAPI",
-            modelName: defaultFreeLLMSummaryModelName,
-            chatCompletionsURL: URL(string: "\(defaultFreeLLMBaseURL)/v1/chat/completions")!,
-            modelsURL: URL(string: "\(defaultFreeLLMBaseURL)/v1/models")!,
-            getAPIKeyURL: URL(string: "\(defaultFreeLLMBaseURL)/models/chat")!,
-            keychainAccount: "freellm_api_key",
-            keyPlaceholder: "FreeLLMAPI Key",
+            id: .omniRoute,
+            displayName: "OmniRoute",
+            modelName: defaultOmniRouteSummaryModelName,
+            chatCompletionsURL: URL(string: "\(defaultOmniRouteBaseURL)/chat/completions")!,
+            modelsURL: URL(string: "\(defaultOmniRouteBaseURL)/models")!,
+            getAPIKeyURL: URL(string: "http://localhost:20128")!,
+            keychainAccount: "omniroute_api_key",
+            keyPlaceholder: "OmniRoute API Key",
             requiredKeyPrefix: nil,
             timeout: 25.0
         ),
@@ -167,8 +167,8 @@ enum LLMProviderCatalog {
         LLMProviderModel(providerID: .groq, id: $0.key, freeStatus: .free, recommendationScore: $0.value)
     })
 
-    static let freeLLMSummaryModels: [LLMProviderModel] = [
-        LLMProviderModel(providerID: .freeLLM, id: defaultFreeLLMSummaryModelName, freeStatus: .unknown, recommendationScore: 100)
+    static let omniRouteSummaryModels: [LLMProviderModel] = [
+        LLMProviderModel(providerID: .omniRoute, id: defaultOmniRouteSummaryModelName, freeStatus: .unknown, recommendationScore: 100)
     ]
 
     static let agnesOrganizerModels: [LLMProviderModel] = [
@@ -184,8 +184,8 @@ enum LLMProviderCatalog {
         switch id {
         case .groq:
             return groqCoreModels
-        case .freeLLM:
-            return freeLLMSummaryModels
+        case .omniRoute:
+            return omniRouteSummaryModels
         case .agnes:
             return agnesOrganizerModels
         }
@@ -224,7 +224,7 @@ enum LLMProviderCatalog {
         let id = modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch providerID {
         case .groq: return groqKnownFreeTextModels[id] != nil
-        case .freeLLM: return id == defaultFreeLLMSummaryModelName
+        case .omniRoute: return id == defaultOmniRouteSummaryModelName
         case .agnes: return id == defaultAgnesOrganizerModelName
         }
     }
@@ -267,21 +267,23 @@ enum LLMProviderCatalog {
         provider(for: .groq)
     }
 
-    static func freeLLMSummaryProvider(baseURL: String = defaultFreeLLMBaseURL) -> LLMProvider? {
-        guard let baseURL = normalizedBaseURL(baseURL),
-              let chatURL = URL(string: "\(baseURL)/v1/chat/completions"),
-              let modelsURL = URL(string: "\(baseURL)/v1/models"),
-              let dashboardURL = URL(string: "\(baseURL)/models/chat")
+    static func omniRouteSummaryProvider(baseURL: String = defaultOmniRouteBaseURL) -> LLMProvider? {
+        guard let normalizedURL = normalizedBaseURL(baseURL) else { return nil }
+        let apiBaseURL = normalizedURL.hasSuffix("/v1") ? normalizedURL : "\(normalizedURL)/v1"
+        let dashboardBaseURL = String(apiBaseURL.dropLast(3))
+        guard let chatURL = URL(string: "\(apiBaseURL)/chat/completions"),
+              let modelsURL = URL(string: "\(apiBaseURL)/models"),
+              let dashboardURL = URL(string: dashboardBaseURL)
         else { return nil }
         return LLMProvider(
-            id: .freeLLM,
-            displayName: "FreeLLMAPI",
-            modelName: defaultFreeLLMSummaryModelName,
+            id: .omniRoute,
+            displayName: "OmniRoute",
+            modelName: defaultOmniRouteSummaryModelName,
             chatCompletionsURL: chatURL,
             modelsURL: modelsURL,
             getAPIKeyURL: dashboardURL,
-            keychainAccount: "freellm_api_key",
-            keyPlaceholder: "FreeLLMAPI Key",
+            keychainAccount: "omniroute_api_key",
+            keyPlaceholder: "OmniRoute API Key",
             requiredKeyPrefix: nil,
             timeout: 25
         )
@@ -302,12 +304,12 @@ enum LLMProviderCatalog {
         credential(for: .groq, from: keys, selectedModelNames: selectedModelNames)
     }
 
-    static func freeLLMSummaryCredential(
+    static func omniRouteSummaryCredential(
         from keys: [LLMProviderID: String],
-        baseURL: String = defaultFreeLLMBaseURL
+        baseURL: String = defaultOmniRouteBaseURL
     ) -> LLMProviderCredential? {
-        guard let provider = freeLLMSummaryProvider(baseURL: baseURL) else { return nil }
-        let key = keys[.freeLLM, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let provider = omniRouteSummaryProvider(baseURL: baseURL) else { return nil }
+        let key = keys[.omniRoute, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
         guard provider.acceptsKey(key) else { return nil }
         return LLMProviderCredential(provider: provider, apiKey: key)
     }
@@ -400,7 +402,12 @@ enum LLMProviderCatalog {
     private static func normalizedBaseURL(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased()) else { return nil }
+        guard let url = URL(string: trimmed),
+              ["http", "https"].contains(url.scheme?.lowercased()),
+              url.host?.isEmpty == false,
+              url.query == nil,
+              url.fragment == nil
+        else { return nil }
         return trimmed
     }
 
@@ -423,7 +430,7 @@ enum LLMProviderCatalog {
         let id = modelID.lowercased()
         switch providerID {
         case .groq: return groqKnownFreeTextModels[id] != nil
-        case .freeLLM: return false
+        case .omniRoute: return false
         case .agnes: return id == defaultAgnesOrganizerModelName
         }
     }
@@ -433,8 +440,8 @@ enum LLMProviderCatalog {
         switch providerID {
         case .groq:
             if let score = groqKnownFreeTextModels[id] { return score }
-        case .freeLLM:
-            if id == defaultFreeLLMSummaryModelName { return 100 }
+        case .omniRoute:
+            if id == defaultOmniRouteSummaryModelName { return 100 }
         case .agnes:
             if id == defaultAgnesOrganizerModelName { return 100 }
         }

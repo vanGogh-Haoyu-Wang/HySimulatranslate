@@ -14,7 +14,7 @@ struct SummaryWorkspaceView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("笔记总结区").font(.headline).foregroundStyle(.secondary)
-                Text("FreeLLMAPI · \(modelName)").font(.caption).foregroundStyle(.secondary)
+                Text("OmniRoute · \(modelName)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if isUpdating { ProgressView().scaleEffect(0.65).frame(width: 16, height: 16) }
             }

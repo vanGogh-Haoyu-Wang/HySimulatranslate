@@ -786,19 +786,31 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertEqual(TranslationLanguagePair(source: "zh", target: "en"), .init(source: "zh-Hans", target: "en"))
     }
 
-    func testLLMProviderCatalogSeparatesGroqCoreAndFreeLLMSummary() throws {
+    func testLLMProviderCatalogSeparatesGroqCoreAndOmniRouteSummary() throws {
         let groq = try XCTUnwrap(LLMProviderCatalog.groqCoreProvider)
-        let freeLLM = try XCTUnwrap(LLMProviderCatalog.freeLLMSummaryProvider())
+        let omniRoute = try XCTUnwrap(LLMProviderCatalog.omniRouteSummaryProvider())
         let agnes = try XCTUnwrap(LLMProviderCatalog.agnesOrganizerProvider)
 
         XCTAssertEqual(groq.displayName, "Groq")
         XCTAssertEqual(groq.modelName, "llama-3.3-70b-versatile")
         XCTAssertEqual(groq.getAPIKeyURL.absoluteString, "https://console.groq.com/keys")
 
-        XCTAssertEqual(freeLLM.displayName, "FreeLLMAPI")
-        XCTAssertEqual(freeLLM.modelName, "auto")
-        XCTAssertEqual(freeLLM.chatCompletionsURL.absoluteString, "http://100.76.88.120:3001/v1/chat/completions")
-        XCTAssertGreaterThanOrEqual(freeLLM.timeout, 20)
+        XCTAssertEqual(omniRoute.displayName, "OmniRoute")
+        XCTAssertEqual(omniRoute.modelName, "auto")
+        XCTAssertEqual(omniRoute.chatCompletionsURL.absoluteString, "http://localhost:20128/v1/chat/completions")
+        XCTAssertGreaterThanOrEqual(omniRoute.timeout, 20)
+
+        let configured = try XCTUnwrap(
+            LLMProviderCatalog.omniRouteSummaryProvider(baseURL: "https://router.example/v1/")
+        )
+        XCTAssertEqual(configured.chatCompletionsURL.absoluteString, "https://router.example/v1/chat/completions")
+        XCTAssertEqual(configured.modelsURL.absoluteString, "https://router.example/v1/models")
+        XCTAssertEqual(
+            LLMProviderCatalog.omniRouteSummaryProvider(baseURL: "https://router.example")?
+                .chatCompletionsURL.absoluteString,
+            "https://router.example/v1/chat/completions"
+        )
+        XCTAssertNil(LLMProviderCatalog.omniRouteSummaryProvider(baseURL: "http://"))
 
         XCTAssertEqual(agnes.displayName, "Agnes 整理")
         XCTAssertEqual(agnes.modelName, "agnes-2.0-flash")
@@ -823,26 +835,26 @@ final class HySimulatranslateTests: XCTestCase {
         )
     }
 
-    func testLLMProviderCredentialsKeepGroqCoreSeparateFromFreeLLMSummary() {
+    func testLLMProviderCredentialsKeepGroqCoreSeparateFromOmniRouteSummary() {
         let keys: [LLMProviderID: String] = [
             .groq: "gsk_test_key",
-            .freeLLM: "router-test-key",
+            .omniRoute: "router-test-key",
             .agnes: "sk-test-key"
         ]
 
         let coreCredential = LLMProviderCatalog.groqCoreCredential(from: keys)
-        let summaryCredential = LLMProviderCatalog.freeLLMSummaryCredential(from: keys)
+        let summaryCredential = LLMProviderCatalog.omniRouteSummaryCredential(from: keys)
         let organizerCredential = LLMProviderCatalog.agnesOrganizerCredential(from: keys)
 
         XCTAssertEqual(coreCredential?.provider.id, .groq)
-        XCTAssertEqual(summaryCredential?.provider.id, .freeLLM)
+        XCTAssertEqual(summaryCredential?.provider.id, .omniRoute)
         XCTAssertEqual(organizerCredential?.provider.id, .agnes)
     }
 
     func testKeychainProviderKeysPayloadKeepsOnlyNonEmptyKnownProviders() {
         let payload = KeychainManager.providerKeysPayload([
             .groq: "  gsk_test  ",
-            .freeLLM: "",
+            .omniRoute: "",
             .agnes: "sk_test"
         ])
 
@@ -855,13 +867,13 @@ final class HySimulatranslateTests: XCTestCase {
     func testKeychainProviderKeysAggregateJSONRoundTrips() {
         let encoded = KeychainManager.encodeProviderKeys([
             .groq: "gsk_test",
-            .freeLLM: " router_test ",
+            .omniRoute: " router_test ",
             .agnes: "sk_test"
         ])
 
         XCTAssertEqual(KeychainManager.decodeProviderKeys(encoded), [
             .groq: "gsk_test",
-            .freeLLM: "router_test",
+            .omniRoute: "router_test",
             .agnes: "sk_test"
         ])
         XCTAssertNil(KeychainManager.decodeProviderKeys("not json"))
@@ -884,7 +896,7 @@ final class HySimulatranslateTests: XCTestCase {
     func testKeychainProviderKeysCanMigrateLegacyAccountsWhenExplicitlyRequested() {
         let legacyValues = [
             "groq_api_key": "gsk_legacy",
-            "freellm_api_key": " router_legacy ",
+            "omniroute_api_key": " router_legacy ",
             "agnes_api_key": "sk_legacy"
         ]
         let migrated = KeychainManager.migrateLegacyProviderKeys { account in
@@ -893,20 +905,20 @@ final class HySimulatranslateTests: XCTestCase {
 
         XCTAssertEqual(migrated, [
             .groq: "gsk_legacy",
-            .freeLLM: "router_legacy",
+            .omniRoute: "router_legacy",
             .agnes: "sk_legacy"
         ])
     }
 
     func testLLMProviderModelListsContainOnlyFreeDefaults() {
         let groqModels = LLMProviderCatalog.models(for: .groq)
-        let freeLLMModels = LLMProviderCatalog.models(for: .freeLLM)
+        let omniRouteModels = LLMProviderCatalog.models(for: .omniRoute)
         let agnesModels = LLMProviderCatalog.models(for: .agnes)
 
         XCTAssertEqual(groqModels.first?.id, LLMProviderCatalog.defaultGroqModelName)
         XCTAssertEqual(groqModels.first?.freeStatus, .free)
-        XCTAssertEqual(freeLLMModels.first?.id, LLMProviderCatalog.defaultFreeLLMSummaryModelName)
-        XCTAssertEqual(freeLLMModels.first?.freeStatus, .unknown)
+        XCTAssertEqual(omniRouteModels.first?.id, LLMProviderCatalog.defaultOmniRouteSummaryModelName)
+        XCTAssertEqual(omniRouteModels.first?.freeStatus, .unknown)
         XCTAssertEqual(agnesModels, [
             LLMProviderModel(
                 providerID: .agnes,
@@ -1101,7 +1113,7 @@ final class HySimulatranslateTests: XCTestCase {
     func testSelectedProviderModelsOverrideCredentialModelNames() {
         let keys: [LLMProviderID: String] = [
             .groq: "gsk_test_key",
-            .freeLLM: "router-test-key"
+            .omniRoute: "router-test-key"
         ]
         let selected: [LLMProviderID: String] = [
             .groq: "llama-3.1-8b-instant"
@@ -1115,7 +1127,7 @@ final class HySimulatranslateTests: XCTestCase {
             "llama-3.1-8b-instant"
         )
         XCTAssertEqual(
-            LLMProviderCatalog.freeLLMSummaryCredential(from: keys)?.provider.modelName,
+            LLMProviderCatalog.omniRouteSummaryCredential(from: keys)?.provider.modelName,
             "auto"
         )
     }
@@ -1123,7 +1135,7 @@ final class HySimulatranslateTests: XCTestCase {
     @MainActor
     func testChangingProviderModelInvalidatesPreviousConnectivityState() {
         let vm = TranscriptionViewModel()
-        vm.providerAPIKeys = [.groq: "gsk_test_key", .freeLLM: "router-test-key"]
+        vm.providerAPIKeys = [.groq: "gsk_test_key", .omniRoute: "router-test-key"]
         vm.engineStatus = .ready("ready")
         vm.sherpaReady = true
         vm.whisperReady = true
@@ -1615,11 +1627,11 @@ final class HySimulatranslateTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Alice asked whether the budget can move."))
     }
 
-    func testFreeLLMSummaryServiceRejectsFailureSummaryText() {
-        XCTAssertNil(FreeLLMSummaryService.normalizedSummaryContent("总结失败"))
-        XCTAssertNil(FreeLLMSummaryService.normalizedSummaryContent("无法根据提供内容生成总结。"))
+    func testOmniRouteSummaryServiceRejectsFailureSummaryText() {
+        XCTAssertNil(OmniRouteSummaryService.normalizedSummaryContent("总结失败"))
+        XCTAssertNil(OmniRouteSummaryService.normalizedSummaryContent("无法根据提供内容生成总结。"))
         XCTAssertEqual(
-            FreeLLMSummaryService.normalizedSummaryContent("A 提出预算问题，B 回答期限优先。"),
+            OmniRouteSummaryService.normalizedSummaryContent("A 提出预算问题，B 回答期限优先。"),
             "A 提出预算问题，B 回答期限优先。"
         )
     }
@@ -2080,7 +2092,7 @@ final class HySimulatranslateTests: XCTestCase {
                     status: .passed
                 ),
                 LLMProviderCheckResult(
-                    provider: LLMProviderCatalog.freeLLMSummaryProvider()!,
+                    provider: LLMProviderCatalog.omniRouteSummaryProvider()!,
                     status: .notConfigured
                 )
             ]
@@ -2093,7 +2105,7 @@ final class HySimulatranslateTests: XCTestCase {
             "[自检] Sherpa: 通过",
             "[自检] WhisperKit 本地灾备: 通过",
             "[自检] Groq / llama-3.3-70b-versatile: 通过",
-            "[自检] FreeLLMAPI / auto: 未配置"
+            "[自检] OmniRoute / auto: 未配置"
         ])
     }
 
@@ -2348,7 +2360,7 @@ final class HySimulatranslateTests: XCTestCase {
     func testProviderCheckStripHidesAfterTranscriptionStartsOrHistoryArrives() {
         let results = [
             LLMProviderCheckResult(provider: LLMProviderCatalog.groqCoreProvider!, status: .passed),
-            LLMProviderCheckResult(provider: LLMProviderCatalog.freeLLMSummaryProvider()!, status: .passed)
+            LLMProviderCheckResult(provider: LLMProviderCatalog.omniRouteSummaryProvider()!, status: .passed)
         ]
         let systemHistory = [
             TranscriptionItem(english: "[自检] Sherpa: 通过", status: .done, zone: .history, isSystemMessage: true)
@@ -2399,12 +2411,12 @@ final class HySimulatranslateTests: XCTestCase {
         let vm = TranscriptionViewModel()
         vm.updateProviderAPIKeys([
             .groq: "gsk_test_key",
-            .freeLLM: "router-test-key",
+            .omniRoute: "router-test-key",
             .agnes: "sk-test-key"
         ])
 
         XCTAssertEqual(vm.providerAPIKeys[.groq], "gsk_test_key")
-        XCTAssertEqual(vm.providerAPIKeys[.freeLLM], "router-test-key")
+        XCTAssertEqual(vm.providerAPIKeys[.omniRoute], "router-test-key")
         XCTAssertEqual(vm.providerAPIKeys[.agnes], "sk-test-key")
         XCTAssertEqual(vm.providerCheckResults.count, 3)
     }
